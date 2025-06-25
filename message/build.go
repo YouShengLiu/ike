@@ -44,7 +44,7 @@ func (container *IKEPayloadContainer) BuildEncrypted(nextPayload IkePayloadType,
 	return encrypted
 }
 
-func (container *IKEPayloadContainer) BUildKeyExchange(diffiehellmanGroup uint16, keyExchangeData []byte) {
+func (container *IKEPayloadContainer) BuildKeyExchange(diffiehellmanGroup uint16, keyExchangeData []byte) {
 	keyExchange := new(KeyExchange)
 	keyExchange.DiffieHellmanGroup = diffiehellmanGroup
 	keyExchange.KeyExchangeData = append(keyExchange.KeyExchangeData, keyExchangeData...)
