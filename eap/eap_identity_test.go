@@ -79,3 +79,20 @@ func TestEapIdentityUnmarshal(t *testing.T) {
 		})
 	}
 }
+
+func TestEapIdentitySetIdentityData(t *testing.T) {
+	id := EapIdentity{}
+	data := []byte{0x11, 0x22, 0x33}
+	id.SetIdentityData(data)
+	require.Equal(t, data, id.IdentityData)
+	// Ensure it is a copy, not a reference
+	data[0] = 0x99
+	require.NotEqual(t, data, id.IdentityData)
+}
+
+func TestEapIdentitySetIdentityDataString(t *testing.T) {
+	id := EapIdentity{}
+	str := "user01"
+	id.SetIdentityDataString(str)
+	require.Equal(t, []byte(str), id.IdentityData)
+}

@@ -31,3 +31,12 @@ func (eapIdentity *EapIdentity) Unmarshal(b []byte) error {
 	}
 	return nil
 }
+
+func (eapIdentity *EapIdentity) SetIdentityData(identityData []byte) {
+	eapIdentity.IdentityData = make([]byte, len(identityData))
+	copy(eapIdentity.IdentityData, identityData)
+}
+
+func (eapIdentity *EapIdentity) SetIdentityDataString(identityData string) {
+	eapIdentity.SetIdentityData([]byte(identityData))
+}
