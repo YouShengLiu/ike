@@ -87,6 +87,27 @@ var (
 		0x60, 0x9c, 0x9e, 0x20, 0x56, 0x9f, 0xc0, 0x39,
 		0xda, 0x3f, 0x22, 0x2a, 0xb8, 0x56, 0x81, 0x8a,
 	}
+
+	eapMD5 = eap_message.EAP{
+		Code:       eap_message.EapCodeRequest,
+		Identifier: 9,
+		EapTypeData: &eap_message.EapMD5{
+			ValueSize: eap_message.EapMD5ChallengeSize,
+			Value:     []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+			Name:      "testuser",
+		},
+	}
+	eapMD5Byte = append(
+		[]byte{
+			0x01,       // Code
+			0x09,       // Identifier
+			0x00, 0x1e, // Length (30 bytes)
+			0x04, 0x10, // Type and ValueSize
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+			0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		},
+		[]byte("testuser")...,
+	)
 )
 
 func TestEapMarshal(t *testing.T) {
@@ -151,6 +172,12 @@ func TestEapMarshal(t *testing.T) {
 			description: "EapExpanded marshal",
 			eap:         eapExpanded,
 			expMarshal:  eapExpandedByte,
+			expErr:      false,
+		},
+		{
+			description: "EapMD5 marshal",
+			eap:         eapMD5,
+			expMarshal:  eapMD5Byte,
 			expErr:      false,
 		},
 	}
@@ -219,6 +246,12 @@ func TestEapUnmarshal(t *testing.T) {
 			description: "EapExpanded unmarshal",
 			b:           eapExpandedByte,
 			expMarshal:  eapExpanded,
+			expErr:      false,
+		},
+		{
+			description: "EapMD5 unmarshal",
+			b:           eapMD5Byte,
+			expMarshal:  eapMD5,
 			expErr:      false,
 		},
 	}

@@ -19,6 +19,9 @@ const (
 	EapTypeIdentity EapType = iota + 1
 	EapTypeNotification
 	EapTypeNak
+	EapTypeMD5
+	EapTypeOTP
+	EapTypeGTC
 	EapTypeAkaPrime EapType = 50
 	EapTypeExpanded EapType = 254
 )
@@ -27,6 +30,9 @@ var typeStr = map[EapType]string{
 	EapTypeIdentity:     "EAP-Identity",
 	EapTypeNotification: "EAP-Notification",
 	EapTypeNak:          "EAP-Nak",
+	EapTypeMD5:          "EAP-MD5-Challenge",
+	EapTypeOTP:          "EAP-OTP",
+	EapTypeGTC:          "EAP-GTC",
 	EapTypeAkaPrime:     "EAP-AKA'",
 	EapTypeExpanded:     "EAP-Expanded",
 }
@@ -145,6 +151,8 @@ func (eap *EAP) Unmarshal(b []byte) error {
 			eapTypeData = new(EapNotification)
 		case EapTypeNak:
 			eapTypeData = new(EapNak)
+		case EapTypeMD5:
+			eapTypeData = new(EapMD5)
 		case EapTypeAkaPrime:
 			eapTypeData = new(EapAkaPrime)
 		case EapTypeExpanded:
