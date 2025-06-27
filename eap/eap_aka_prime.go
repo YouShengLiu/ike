@@ -158,11 +158,9 @@ func (eapAkaPrime *EapAkaPrime) Marshal() ([]byte, error) {
 			return nil, errors.Wrapf(err, "EAP-AKA' Marshal(): write attribute/length failed")
 		}
 
-		if attr.attrType != AT_KDF {
-			err = binary.Write(buffer, binary.BigEndian, attr.reserved)
-			if err != nil {
-				return nil, errors.Wrapf(err, "EAP-AKA' Marshal(): write attribute/reserved failed")
-			}
+		err = binary.Write(buffer, binary.BigEndian, attr.reserved)
+		if err != nil {
+			return nil, errors.Wrapf(err, "EAP-AKA' Marshal(): write attribute/reserved failed")
 		}
 
 		err = binary.Write(buffer, binary.BigEndian, attr.value)
@@ -327,7 +325,34 @@ func (eapAkaPrime *EapAkaPrime) Unmarshal(rawData []byte) error {
 				}
 			}
 		case AT_KDF:
-			valLen := 4*attr.length - EapAkaAttrTypeLen - EapAkaAttrLengthLen
+			// 2 bytes reserved, no value
+			reserved := make([]byte, EapAkaAttrReservedLen)
+			n, err = io.ReadFull(bufReader, reserved)
+			if n != EapAkaAttrReservedLen {
+				return errors.Errorf("EAP-AKA' Unmarshal(): incomplete reserved bytes for %s", attr.attrType)
+			}
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return errors.Wrapf(err, "EAP-AKA' Unmarshal(): read %s attribute/reserved failed", attr.attrType)
+			}
+			attr.reserved = binary.BigEndian.Uint16(reserved)
+			attr.value = nil
+		case AT_CHECKCODE:
+			reserved := make([]byte, EapAkaAttrReservedLen)
+			n, err = io.ReadFull(bufReader, reserved)
+			if n != EapAkaAttrReservedLen {
+				return errors.Errorf("EAP-AKA' Unmarshal(): incomplete reserved bytes for %s", attr.attrType)
+			}
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return errors.Wrapf(err, "EAP-AKA' Unmarshal(): read %s attribute/reserved failed", attr.attrType)
+			}
+
+			valLen := 4*attr.length - EapAkaAttrTypeLen - EapAkaAttrLengthLen - EapAkaAttrReservedLen
 			attr.value = make([]byte, valLen)
 			n, err = io.ReadFull(bufReader, attr.value)
 			if n != int(valLen) {
@@ -342,6 +367,21 @@ func (eapAkaPrime *EapAkaPrime) Unmarshal(rawData []byte) error {
 				}
 				return errors.Wrapf(err, "EAP-AKA' Unmarshal(): read %s attribute/value failed", attr.attrType)
 			}
+		case AT_NOTIFICATION:
+			// 2 bytes reserved, no value
+			reserved := make([]byte, EapAkaAttrReservedLen)
+			n, err = io.ReadFull(bufReader, reserved)
+			if n != EapAkaAttrReservedLen {
+				return errors.Errorf("EAP-AKA' Unmarshal(): incomplete reserved bytes for %s", attr.attrType)
+			}
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return errors.Wrapf(err, "EAP-AKA' Unmarshal(): read %s attribute/reserved failed", attr.attrType)
+			}
+			attr.reserved = binary.BigEndian.Uint16(reserved)
+			attr.value = nil
 		}
 
 		// Set attribute
@@ -508,8 +548,8 @@ func (attr *EapAkaPrimeAttr) setAttr(attrType EapAkaPrimeAttrType, value []byte)
 			return errors.Errorf("%s needs exactly 2 bytes, but got %d bytes", attrType, valLen)
 		}
 		attr.length = 1
-		attr.value = make([]byte, valLen)
-		copy(attr.value, value)
+		attr.reserved = binary.BigEndian.Uint16(value)
+		attr.value = nil
 	case AT_CHECKCODE:
 		// RFC 4187:
 		//    The value field of AT_CHECKCODE begins with two reserved bytes, which
@@ -535,6 +575,20 @@ func (attr *EapAkaPrimeAttr) setAttr(attrType EapAkaPrimeAttrType, value []byte)
 		attr.length = uint8((EapAkaAttrTypeLen + EapAkaAttrTypeLen + EapAkaAttrReservedLen + valLen) / 4)
 		attr.value = make([]byte, valLen)
 		copy(attr.value, value)
+	case AT_NOTIFICATION:
+		// RFC 4187 Section 10.19:
+		// 0                   1                   2                   3
+		// 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+		// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		// |AT_NOTIFICATION| Length = 1    |S|P|  Notification Code        |
+		// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		valLen := len(value)
+		if valLen != 2 {
+			return errors.Errorf("%s needs exactly 2 bytes for Notification Code, but got %d bytes", attrType, valLen)
+		}
+		attr.length = 1
+		attr.reserved = binary.BigEndian.Uint16(value)
+		attr.value = nil
 	default:
 		err = errors.Errorf("%s is not supported", attrType)
 	}
@@ -544,7 +598,18 @@ func (attr *EapAkaPrimeAttr) setAttr(attrType EapAkaPrimeAttrType, value []byte)
 
 func (attr *EapAkaPrimeAttr) GetAttrType() EapAkaPrimeAttrType { return attr.attrType }
 
-func (attr *EapAkaPrimeAttr) GetValue() []byte { return attr.value }
+func (attr *EapAkaPrimeAttr) GetValue() []byte {
+	var b []byte
+	if attr.attrType == AT_KDF || attr.attrType == AT_NOTIFICATION {
+		b = make([]byte, EapAkaAttrReservedLen)
+		binary.BigEndian.PutUint16(b, attr.reserved)
+		return b
+	} else {
+		b = make([]byte, len(attr.value))
+		copy(b, attr.value)
+	}
+	return b
+}
 
 // RFC 9048 - 3.4.1. PRF'
 func EapAkaPrimePRF(

@@ -158,6 +158,18 @@ func TestEapAkaPrimeSetGetAttr(t *testing.T) {
 			value:     []byte{0x01},
 			expectErr: true,
 		},
+		{
+			name:      "Set AT_NOTIFICATION with valid length",
+			attrType:  AT_NOTIFICATION,
+			value:     []byte{0x12, 0x34},
+			expectErr: false,
+		},
+		{
+			name:      "Set AT_NOTIFICATION with invalid length",
+			attrType:  AT_NOTIFICATION,
+			value:     []byte{0x12},
+			expectErr: true,
+		},
 	}
 
 	for _, tc := range tcs {
@@ -184,6 +196,8 @@ func TestEapAkaPrimeSetGetAttr(t *testing.T) {
 				require.Equal(t, uint8(1), attr.length)
 			case AT_MAC, AT_RAND, AT_AUTN:
 				require.Equal(t, uint8(5), attr.length)
+			case AT_NOTIFICATION:
+				require.Equal(t, uint8(1), attr.length)
 			}
 		})
 	}
@@ -364,6 +378,20 @@ func TestEapAkaPrimeMarshal(t *testing.T) {
 			},
 			expectErr: false,
 		},
+		{
+			name:    "AT_NOTIFICATION basic",
+			subType: SubtypeAkaNotification,
+			attrs: map[EapAkaPrimeAttrType][]byte{
+				AT_NOTIFICATION: {0x12, 0x34},
+			},
+			expectedResult: []byte{
+				byte(EapTypeAkaPrime),
+				byte(SubtypeAkaNotification),
+				0x00, 0x00,
+				0x0c, 0x01, 0x12, 0x34, // AT_NOTIFICATION (type=12, length=1, value=0x12 0x34)
+			},
+			expectErr: false,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -514,6 +542,19 @@ func TestEapAkaPrimeUnmarshal(t *testing.T) {
 				// Missing AT_RAND value
 			},
 			expectErr: true,
+		},
+		{
+			name: "AT_NOTIFICATION basic",
+			rawData: []byte{
+				byte(EapTypeAkaPrime),
+				byte(SubtypeAkaNotification),
+				0x00, 0x00,
+				0x0c, 0x01, 0x12, 0x34, // AT_NOTIFICATION (type=12, length=1, value=0x12 0x34)
+			},
+			expectedAttrs: map[EapAkaPrimeAttrType][]byte{
+				AT_NOTIFICATION: {0x12, 0x34},
+			},
+			expectErr: false,
 		},
 	}
 
