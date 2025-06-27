@@ -158,9 +158,12 @@ func (eapAkaPrime *EapAkaPrime) Marshal() ([]byte, error) {
 			return nil, errors.Wrapf(err, "EAP-AKA' Marshal(): write attribute/length failed")
 		}
 
-		err = binary.Write(buffer, binary.BigEndian, attr.reserved)
-		if err != nil {
-			return nil, errors.Wrapf(err, "EAP-AKA' Marshal(): write attribute/reserved failed")
+		// AT_AUTS has no reserved field
+		if attr.attrType != AT_AUTS {
+			err = binary.Write(buffer, binary.BigEndian, attr.reserved)
+			if err != nil {
+				return nil, errors.Wrapf(err, "EAP-AKA' Marshal(): write attribute/reserved failed")
+			}
 		}
 
 		err = binary.Write(buffer, binary.BigEndian, attr.value)
@@ -382,6 +385,25 @@ func (eapAkaPrime *EapAkaPrime) Unmarshal(rawData []byte) error {
 			}
 			attr.reserved = binary.BigEndian.Uint16(reserved)
 			attr.value = nil
+		case AT_AUTS:
+			if attr.length != 4 {
+				return errors.Errorf("EAP-AKA' Unmarshal(): %s attribute length must be 4", attr.attrType)
+			}
+			valLen := 4*attr.length - EapAkaAttrTypeLen - EapAkaAttrLengthLen
+			attr.value = make([]byte, valLen)
+			n, err = io.ReadFull(bufReader, attr.value)
+			if n != int(valLen) {
+				return errors.Errorf("EAP-AKA' Unmarshal(): %s attribute value length mismatch, "+
+					"expect %d bytes but got %d bytes",
+					attr.attrType, valLen, n,
+				)
+			}
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return errors.Wrapf(err, "EAP-AKA' Unmarshal(): read %s attribute/value failed", attr.attrType)
+			}
 		}
 
 		// Set attribute
@@ -480,6 +502,25 @@ func (attr *EapAkaPrimeAttr) setAttr(attrType EapAkaPrimeAttrType, value []byte)
 			return errors.Errorf("Set %s failed: expect 16 bytes, but got %d bytes", attrType, valLen)
 		}
 		attr.length = uint8((EapAkaAttrTypeLen + EapAkaAttrTypeLen + EapAkaAttrReservedLen + valLen) / 4)
+		attr.value = make([]byte, valLen)
+		copy(attr.value, value)
+	case AT_AUTS:
+		// RFC 4187 section 10.9: AT_AUTS
+		//     0                   1                   2                   3
+		//     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+		//    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+|
+		//    |    AT_AUTS    | Length = 4    |                               |
+		//    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               |
+		//    |                                                               |
+		//    |                             AUTS                              |
+		//    |                                                               |
+		//    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		valLen := len(value)
+		if valLen != 14 {
+			return errors.Errorf("Set %s failed: expect 14 bytes, but got %d bytes", attrType, valLen)
+		}
+		attr.length = 4
+		attr.reserved = 0
 		attr.value = make([]byte, valLen)
 		copy(attr.value, value)
 	case AT_KDF_INPUT:
