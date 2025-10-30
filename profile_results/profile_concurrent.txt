@@ -1,0 +1,43 @@
+=== Concurrent DH ===
+
+Top 20 CPU-consuming functions:
+File: dh.test
+Type: cpu
+Time: Oct 30, 2025 at 9:07am (CST)
+Duration: 26.48s, Total samples = 149.75s (565.59%)
+Showing nodes accounting for 145.05s, 96.86% of 149.75s total
+Dropped 248 nodes (cum <= 0.75s)
+Showing top 20 nodes out of 23
+      flat  flat%   sum%        cum   cum%
+   125.13s 83.56% 83.56%    125.13s 83.56%  math/big.addMulVVW
+    17.59s 11.75% 95.31%    145.63s 97.25%  math/big.nat.montgomery
+     0.86s  0.57% 95.88%      0.86s  0.57%  runtime.procyield
+     0.85s  0.57% 96.45%      0.85s  0.57%  runtime.memclrNoHeapPointers
+     0.28s  0.19% 96.63%    146.74s 97.99%  math/big.nat.expNNMontgomery
+     0.09s  0.06% 96.69%      1.35s   0.9%  runtime.mallocgc
+     0.07s 0.047% 96.74%      0.85s  0.57%  runtime.lock2
+     0.05s 0.033% 96.77%      1.17s  0.78%  runtime.newstack
+     0.04s 0.027% 96.80%      1.36s  0.91%  runtime.makeslice
+     0.03s  0.02% 96.82%      1.20s   0.8%  math/big.nat.make (inline)
+     0.02s 0.013% 96.83%      1.08s  0.72%  runtime.morestack
+     0.01s 0.0067% 96.84%     72.81s 48.62%  github.com/free5gc/ike/security/dh.(*DH2048BitModp).GetPublicValue
+     0.01s 0.0067% 96.85%    146.78s 98.02%  math/big.(*Int).exp
+     0.01s 0.0067% 96.85%    146.77s 98.01%  math/big.nat.expNN
+     0.01s 0.0067% 96.86%      1.63s  1.09%  runtime.systemstack
+         0     0% 96.86%     74.23s 49.57%  github.com/free5gc/ike/security/dh.(*DH2048BitModp).GetSharedKey
+         0     0% 96.86%    147.37s 98.41%  github.com/free5gc/ike/security/dh.BenchmarkDH_2048_Concurrent.func1
+         0     0% 96.86%    146.78s 98.02%  math/big.(*Int).Exp (inline)
+         0     0% 96.86%      1.13s  0.75%  runtime.gopreempt_m (inline)
+         0     0% 96.86%      1.13s  0.75%  runtime.goschedImpl
+
+Call graph (top 30):
+Total: 149.75s
+ROUTINE ======================== math/big.(*Int).Exp in /usr/local/go/src/math/big/int.go
+         0    146.78s (flat, cum) 98.02% of Total
+         .          .    560:func (z *Int) Exp(x, y, m *Int) *Int {
+         .    146.78s    561:	return z.exp(x, y, m, false)
+         .          .    562:}
+         .          .    563:
+         .          .    564:func (z *Int) expSlow(x, y, m *Int) *Int {
+         .          .    565:	return z.exp(x, y, m, true)
+         .          .    566:}

@@ -1,0 +1,43 @@
+=== Shared Key Computation ===
+
+Top 20 CPU-consuming functions:
+File: dh.test
+Type: cpu
+Time: Oct 30, 2025 at 9:07am (CST)
+Duration: 5.64s, Total samples = 5.29s (93.81%)
+Showing nodes accounting for 5.15s, 97.35% of 5.29s total
+Dropped 45 nodes (cum <= 0.03s)
+Showing top 20 nodes out of 22
+      flat  flat%   sum%        cum   cum%
+     4.56s 86.20% 86.20%      4.56s 86.20%  math/big.addMulVVW
+     0.50s  9.45% 95.65%      5.15s 97.35%  math/big.nat.montgomery
+     0.04s  0.76% 96.41%      0.04s  0.76%  math/big.subVV
+     0.03s  0.57% 96.98%      0.03s  0.57%  runtime.memclrNoHeapPointers
+     0.01s  0.19% 97.16%      0.04s  0.76%  math/big.nat.divBasic
+     0.01s  0.19% 97.35%      5.22s 98.68%  math/big.nat.expNNMontgomery
+         0     0% 97.35%      5.24s 99.05%  github.com/free5gc/ike/security/dh.(*DH2048BitModp).GetSharedKey
+         0     0% 97.35%      5.24s 99.05%  github.com/free5gc/ike/security/dh.BenchmarkDH_2048_GetSharedKey
+         0     0% 97.35%      5.22s 98.68%  math/big.(*Int).Exp (inline)
+         0     0% 97.35%      5.22s 98.68%  math/big.(*Int).exp
+         0     0% 97.35%      0.05s  0.95%  math/big.nat.div
+         0     0% 97.35%      0.05s  0.95%  math/big.nat.divLarge
+         0     0% 97.35%      5.22s 98.68%  math/big.nat.expNN
+         0     0% 97.35%      0.06s  1.13%  math/big.nat.make (inline)
+         0     0% 97.35%      0.04s  0.76%  runtime.(*mcache).nextFree
+         0     0% 97.35%      0.04s  0.76%  runtime.(*mcache).refill
+         0     0% 97.35%      0.07s  1.32%  runtime.makeslice
+         0     0% 97.35%      0.07s  1.32%  runtime.mallocgc
+         0     0% 97.35%      0.03s  0.57%  runtime.markroot
+         0     0% 97.35%      0.05s  0.95%  runtime.systemstack
+
+Call graph (top 30):
+Total: 5.29s
+ROUTINE ======================== math/big.(*Int).Exp in /usr/local/go/src/math/big/int.go
+         0      5.22s (flat, cum) 98.68% of Total
+         .          .    560:func (z *Int) Exp(x, y, m *Int) *Int {
+         .      5.22s    561:	return z.exp(x, y, m, false)
+         .          .    562:}
+         .          .    563:
+         .          .    564:func (z *Int) expSlow(x, y, m *Int) *Int {
+         .          .    565:	return z.exp(x, y, m, true)
+         .          .    566:}

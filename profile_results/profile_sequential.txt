@@ -1,0 +1,38 @@
+=== Sequential DH ===
+
+Top 20 CPU-consuming functions:
+File: dh.test
+Type: cpu
+Time: Oct 30, 2025 at 9:06am (CST)
+Duration: 23.77s, Total samples = 22.72s (95.56%)
+Showing nodes accounting for 22.12s, 97.36% of 22.72s total
+Dropped 121 nodes (cum <= 0.11s)
+      flat  flat%   sum%        cum   cum%
+    19.21s 84.55% 84.55%     19.21s 84.55%  math/big.addMulVVW
+     2.58s 11.36% 95.91%     22.25s 97.93%  math/big.nat.montgomery
+     0.19s  0.84% 96.74%      0.19s  0.84%  runtime.memclrNoHeapPointers
+     0.10s  0.44% 97.18%     22.42s 98.68%  math/big.nat.expNNMontgomery
+     0.02s 0.088% 97.27%      0.20s  0.88%  runtime.mallocgc
+     0.01s 0.044% 97.32%     22.43s 98.72%  math/big.(*Int).exp
+     0.01s 0.044% 97.36%      0.20s  0.88%  runtime.makeslice
+         0     0% 97.36%     11.07s 48.72%  github.com/free5gc/ike/security/dh.(*DH2048BitModp).GetPublicValue
+         0     0% 97.36%     11.40s 50.18%  github.com/free5gc/ike/security/dh.(*DH2048BitModp).GetSharedKey
+         0     0% 97.36%     22.55s 99.25%  github.com/free5gc/ike/security/dh.BenchmarkDH_2048_Combined
+         0     0% 97.36%     22.43s 98.72%  math/big.(*Int).Exp (inline)
+         0     0% 97.36%     22.42s 98.68%  math/big.nat.expNN
+         0     0% 97.36%      0.15s  0.66%  math/big.nat.make (inline)
+         0     0% 97.36%      0.15s  0.66%  runtime.systemstack
+         0     0% 97.36%     22.55s 99.25%  testing.(*B).launch
+         0     0% 97.36%     22.55s 99.25%  testing.(*B).runN
+
+Call graph (top 30):
+Total: 22.72s
+ROUTINE ======================== math/big.(*Int).Exp in /usr/local/go/src/math/big/int.go
+         0     22.43s (flat, cum) 98.72% of Total
+         .          .    560:func (z *Int) Exp(x, y, m *Int) *Int {
+         .     22.43s    561:	return z.exp(x, y, m, false)
+         .          .    562:}
+         .          .    563:
+         .          .    564:func (z *Int) expSlow(x, y, m *Int) *Int {
+         .          .    565:	return z.exp(x, y, m, true)
+         .          .    566:}

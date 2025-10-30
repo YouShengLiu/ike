@@ -1,0 +1,9 @@
+goos: linux
+goarch: amd64
+pkg: github.com/free5gc/ike/security/dh
+cpu: 12th Gen Intel(R) Core(TM) i5-12400
+BenchmarkDH_2048_Combined-8   	    5365	   1071270 ns/op
+BenchmarkDH_2048_Combined-8   	    5990	   1072265 ns/op
+BenchmarkDH_2048_Combined-8   	    5668	   1090556 ns/op
+PASS
+ok  	github.com/free5gc/ike/security/dh	23.786s
