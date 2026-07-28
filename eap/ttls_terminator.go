@@ -1,0 +1,279 @@
+package eap
+
+import (
+	"crypto/tls"
+	"io"
+	"time"
+
+	"github.com/pkg/errors"
+)
+
+// bridgeOutputTimeout bounds how long emitOutbound waits for the bridge's
+// background handshake goroutine to produce output after writeInbound
+// returns (writeInbound only enqueues bytes; the goroutine consumes and
+// reacts to them asynchronously). In practice this resolves in well under a
+// millisecond; a multi-second bound only guards against a genuinely stuck
+// handshake goroutine, which should surface as an error rather than a
+// silent hang.
+const bridgeOutputTimeout = 3 * time.Second
+
+// ttlsState tracks where a single EAP-TTLS authentication is in its
+// lifecycle: before anything has been sent, mid-handshake, waiting for the
+// tunneled inner (PAP) data once the handshake has completed, or finished.
+type ttlsState int
+
+const (
+	ttlsStateStart ttlsState = iota
+	ttlsStateHandshake
+	ttlsStateInner
+	ttlsStateDone
+)
+
+// Terminator drives one server-side EAP-TTLS authentication: it emits
+// TTLS-Start, runs the TLS handshake via a tlsBridge (fragmenting/
+// reassembling EAP-TTLS TLS-data as needed), and once the tunnel is up reads
+// the peer's decrypted inner PAP AVPs and derives keying material.
+//
+// P1 scope: Terminator does not verify the password. It only extracts the
+// inner identity/password (PapCredential) and the MSK/EMSK and hands them to
+// the caller; credential verification is a separate, later concern.
+//
+// A Terminator drives exactly one authentication and is not safe for
+// concurrent use from multiple goroutines (the caller is expected to call
+// Process sequentially, matching the EAP request/response ping-pong).
+type Terminator struct {
+	bridge *tlsBridge
+	cfg    *tls.Config
+	mtu    int
+	state  ttlsState
+
+	// inPending accumulates TLS bytes for the inbound message currently
+	// being reassembled. The peer sets EapTlsFlagMoreFragments on every
+	// fragment but the last one of a multi-fragment message.
+	inPending []byte
+
+	// outPending holds the remaining bytes of the outbound message we are
+	// currently fragmenting out to the peer. It is nil whenever no
+	// fragmented send is in flight -- either because we haven't started a
+	// message yet, or because the message we were sending has been fully
+	// delivered. A non-nil/non-empty outPending after emitOutbound returns
+	// means the peer's next inbound packet is expected to be a bare
+	// fragment-ack (empty TLS-data, no flags), not a new message: see the
+	// check at the top of the handshake/inner branch of Process.
+	outPending []byte
+	// outTotal is the total length of the outbound message currently being
+	// fragmented, recorded once when the message is first pulled off the
+	// bridge. It is used for the Message-Length field, which per RFC 5281
+	// is only meaningful (and only sent, with the L flag) on that message's
+	// FIRST fragment -- not the first chunk's own length, but the length of
+	// the complete message across all its fragments.
+	outTotal uint32
+	// outFirst is true exactly when the next fragment emitOutbound sends is
+	// the first fragment of outTotal's message.
+	outFirst bool
+}
+
+// NewTerminator creates a Terminator for one EAP-TTLS authentication. mtu is
+// the maximum size of the TLS-data carried in a single EAP-TTLS packet;
+// larger bridge output is fragmented across multiple packets.
+func NewTerminator(cfg *tls.Config, mtu int) *Terminator {
+	return &Terminator{cfg: cfg, mtu: mtu, state: ttlsStateStart}
+}
+
+// TerminatorStep is the result of one Process call.
+type TerminatorStep struct {
+	OutTypeData []byte // EAP-TTLS type-data to wrap in an EAP-Request (nil if none pending)
+	Done        bool
+	Success     bool
+	Cred        *PapCredential
+	Keys        *TtlsKeys
+}
+
+// Process advances the EAP-TTLS state machine by one step. Call it first
+// with inTypeData == nil to obtain the initial TTLS-Start packet, then once
+// per subsequent EAP-Response received from the peer, feeding that
+// response's EAP-TTLS type-data (starting at the Type byte) as inTypeData.
+func (t *Terminator) Process(inTypeData []byte) (*TerminatorStep, error) {
+	switch t.state {
+	case ttlsStateStart:
+		t.bridge = newTLSBridge(t.cfg)
+		t.state = ttlsStateHandshake
+		start := &EapTtls{Flags: EapTlsFlagStart}
+		out, err := start.Marshal()
+		if err != nil {
+			return nil, errors.Wrap(err, "Terminator: marshal TTLS-Start")
+		}
+		return &TerminatorStep{OutTypeData: out}, nil
+
+	case ttlsStateHandshake, ttlsStateInner:
+		var pkt EapTtls
+		if err := pkt.Unmarshal(inTypeData); err != nil {
+			return nil, errors.Wrap(err, "Terminator: decode inbound")
+		}
+
+		// If we're mid-way through sending our own fragmented outbound
+		// message, the peer's only legal reply is a bare ack (empty
+		// TLS-data, no flags) requesting the next fragment -- it carries no
+		// data of its own to reassemble. Continue the outbound send instead
+		// of trying to interpret this packet as a new inbound message.
+		if len(t.outPending) > 0 {
+			return t.emitOutbound()
+		}
+
+		// Reassemble the peer's (possibly fragmented) inbound message.
+		t.inPending = append(t.inPending, pkt.TLSData...)
+		if pkt.Flags&EapTlsFlagMoreFragments != 0 {
+			ack := &EapTtls{}
+			out, err := ack.Marshal()
+			if err != nil {
+				return nil, errors.Wrap(err, "Terminator: marshal fragment ack")
+			}
+			return &TerminatorStep{OutTypeData: out}, nil
+		}
+		msg := t.inPending
+		t.inPending = nil
+
+		// wasInner: whether we had already finished the handshake as of the
+		// START of this round (i.e. in a previous Process call). If so, the
+		// message we just reassembled is necessarily encrypted inner
+		// (tunneled PAP) application data, not more handshake bytes -- and
+		// it is therefore safe to call the blocking readAppData() below,
+		// since we know the corresponding TLS record(s) were just fed via
+		// writeInbound in this very call. If the handshake only *just*
+		// finished (this round), the message we fed was the peer's final
+		// handshake flight, not inner data yet; reading app data now would
+		// block forever since the peer's inner AVP write hasn't happened
+		// yet on the wire (it can only arrive in a later Process call), and
+		// there's no way to unblock a synchronous call by waiting for more
+		// input we can't fetch until this call returns.
+		wasInner := t.state == ttlsStateInner
+
+		if len(msg) > 0 {
+			if err := t.bridge.writeInbound(msg); err != nil {
+				return nil, errors.Wrap(err, "Terminator: feed TLS")
+			}
+		}
+
+		if wasInner {
+			app, err := t.bridge.readAppData()
+			if err != nil && err != io.EOF {
+				return nil, errors.Wrap(err, "Terminator: read inner")
+			}
+			if len(app) == 0 {
+				return nil, errors.Errorf("Terminator: expected inner data, got none")
+			}
+			cred, err := ParsePapAVPs(app)
+			if err != nil {
+				return nil, errors.Wrap(err, "Terminator: parse PAP")
+			}
+			keys, err := DeriveTtlsKeys(t.bridge.connState())
+			if err != nil {
+				return nil, errors.Wrap(err, "Terminator: derive keys")
+			}
+			t.state = ttlsStateDone
+			_ = t.bridge.close()
+			return &TerminatorStep{Done: true, Success: true, Cred: cred, Keys: keys}, nil
+		}
+
+		// Flush whatever the bridge has queued as output this round (the
+		// next handshake flight; or, once the handshake finishes, its final
+		// flight and/or TLS 1.3 post-handshake session tickets; or nothing
+		// at all, in which case emitOutbound sends an empty packet that
+		// both keeps the EAP exchange alive and acts as the implicit
+		// prompt for the peer to start sending its inner PAP data).
+		//
+		// emitOutbound's internal wait (waitForBridgeOutput) blocks until
+		// either output appears or the bridge's background handshake
+		// goroutine reports done -- so only AFTER it returns is
+		// bridge.handshakeDone() guaranteed to reflect that goroutine's
+		// current state. Checking handshakeDone() before calling
+		// emitOutbound (as an earlier version of this code did) races: the
+		// goroutine may not have processed the just-fed inbound record yet,
+		// so the check can read false even though the handshake is about
+		// to complete, leaving t.state stuck at ttlsStateHandshake forever
+		// and causing the next round's inner AVP data to be misrouted
+		// through the handshake path instead of readAppData.
+		step, err := t.emitOutbound()
+		if err != nil {
+			return nil, err
+		}
+		if t.bridge.handshakeDone() {
+			if err := t.bridge.handshakeErr(); err != nil {
+				return nil, errors.Wrap(err, "Terminator: handshake failed")
+			}
+			t.state = ttlsStateInner
+		}
+		return step, nil
+
+	default:
+		return nil, errors.Errorf("Terminator: Process called in terminal state")
+	}
+}
+
+// emitOutbound takes pending TLS bytes produced by the bridge and returns
+// one EAP-TTLS packet, fragmenting to t.mtu. The first fragment of a
+// multi-fragment message carries the L flag and Message-Length set to the
+// TOTAL length of the message (recorded once, when the message is first
+// pulled off the bridge) -- not the length of just that first chunk.
+// Non-final fragments carry the M flag.
+func (t *Terminator) emitOutbound() (*TerminatorStep, error) {
+	if t.outPending == nil {
+		msg, err := t.waitForBridgeOutput()
+		if err != nil {
+			return nil, err
+		}
+		t.outPending = msg
+		t.outTotal = uint32(len(msg))
+		t.outFirst = true
+	}
+
+	pkt := &EapTtls{}
+	var chunk []byte
+	moreAfter := t.mtu > 0 && len(t.outPending) > t.mtu
+	if moreAfter {
+		chunk = t.outPending[:t.mtu]
+		t.outPending = t.outPending[t.mtu:]
+		pkt.Flags |= EapTlsFlagMoreFragments
+	} else {
+		chunk = t.outPending
+		t.outPending = nil
+	}
+	if t.outFirst && moreAfter {
+		pkt.Flags |= EapTlsFlagLengthIncluded
+		pkt.MessageLength = t.outTotal
+	}
+	t.outFirst = false
+	pkt.TLSData = chunk
+
+	out, err := pkt.Marshal()
+	if err != nil {
+		return nil, errors.Wrap(err, "Terminator: marshal outbound fragment")
+	}
+	return &TerminatorStep{OutTypeData: out}, nil
+}
+
+// waitForBridgeOutput polls the bridge for output produced by its
+// background handshake goroutine. It returns as soon as output appears. If
+// none has appeared yet but the handshake has finished, that's a legitimate
+// "nothing more to flush" result (Go's tls.Conn.Handshake performs all of
+// its writes -- including any post-handshake session tickets -- before
+// returning, so once handshakeDone() is true any output it was going to
+// produce is already visible to readOutbound()). If neither happens within
+// bridgeOutputTimeout, something is stuck and that's reported as an error
+// rather than silently returning an empty packet (which would otherwise
+// look identical to the legitimate case and desync the peer).
+func (t *Terminator) waitForBridgeOutput() ([]byte, error) {
+	deadline := time.Now().Add(bridgeOutputTimeout)
+	for {
+		if out := t.bridge.readOutbound(); len(out) > 0 {
+			return out, nil
+		}
+		if t.bridge.handshakeDone() {
+			return nil, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, errors.Errorf("Terminator: timed out waiting for TLS engine output")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
