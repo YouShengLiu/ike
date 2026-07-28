@@ -1,0 +1,180 @@
+package eap
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"io"
+	"net"
+	"sync"
+	"time"
+)
+
+// tlsBridge drives a server-side TLS handshake whose records are carried
+// out-of-band (inside EAP-TTLS packets) rather than over a real socket.
+//
+// Design note: an earlier draft wired tls.Server directly to one end of a
+// net.Pipe, with writeInbound/readOutbound talking to the other end. That
+// deadlocks under the lock-step calling pattern EAP-TTLS requires: a caller
+// does writeInbound(record) followed immediately by readAppData() on the
+// same goroutine, but net.Pipe's Write blocks until a matching Read occurs,
+// and nothing performs that Read until writeInbound has already returned.
+// Instead, tls.Server is wired to an internal engineConn backed by two
+// plain byte buffers guarded by a mutex/condition variable: writeInbound and
+// readOutbound never block, and engineConn.Read blocks only on the
+// condition variable (not on a synchronous pipe rendezvous), so it can
+// always be unblocked by close().
+type tlsBridge struct {
+	conn *tls.Conn
+
+	mu       sync.Mutex
+	cond     *sync.Cond
+	inbound  bytes.Buffer // TLS bytes fed by writeInbound, awaiting engine consumption
+	outbound bytes.Buffer // TLS bytes produced by the engine, awaiting readOutbound
+	hsDone   bool
+	hsErr    error
+	closed   bool
+}
+
+// newTLSBridge starts a server-side TLS handshake in the background. The
+// handshake progresses as the caller shuttles bytes via writeInbound and
+// readOutbound.
+func newTLSBridge(cfg *tls.Config) *tlsBridge {
+	b := &tlsBridge{}
+	b.cond = sync.NewCond(&b.mu)
+	b.conn = tls.Server(engineConn{b}, cfg)
+
+	go func() {
+		err := b.conn.HandshakeContext(context.Background())
+		b.mu.Lock()
+		b.hsDone = true
+		b.hsErr = err
+		b.mu.Unlock()
+	}()
+	return b
+}
+
+// writeInbound feeds TLS bytes received from the peer into the engine. It
+// never blocks: bytes are appended to an internal buffer that engineConn.Read
+// drains as the TLS engine asks for input.
+func (b *tlsBridge) writeInbound(tlsRecord []byte) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return io.ErrClosedPipe
+	}
+	b.inbound.Write(tlsRecord)
+	b.cond.Broadcast()
+	return nil
+}
+
+// readOutbound returns and clears any TLS bytes the engine has produced for
+// the peer. Returns nil if nothing is pending.
+func (b *tlsBridge) readOutbound() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.outbound.Len() == 0 {
+		return nil
+	}
+	out := append([]byte(nil), b.outbound.Bytes()...)
+	b.outbound.Reset()
+	return out
+}
+
+// handshakeDone reports whether the TLS handshake has finished (successfully
+// or not). Callers should check the error via a subsequent connState/read.
+func (b *tlsBridge) handshakeDone() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.hsDone
+}
+
+// handshakeErr returns the handshake result error, if the handshake has
+// completed. It is nil while the handshake is still in progress or if it
+// succeeded.
+func (b *tlsBridge) handshakeErr() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.hsErr
+}
+
+func (b *tlsBridge) connState() tls.ConnectionState {
+	return b.conn.ConnectionState()
+}
+
+// readAppData reads one chunk of decrypted application data (inner AVPs).
+// It blocks until the engine has decrypted data available, an error occurs,
+// or the bridge is closed. Callers must have already delivered the
+// corresponding TLS record(s) via writeInbound before calling this.
+func (b *tlsBridge) readAppData() ([]byte, error) {
+	buf := make([]byte, 16384)
+	n, err := b.conn.Read(buf)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return buf[:n], err
+}
+
+// close tears down the TLS engine and unblocks any in-progress reads.
+// tls.Conn.Close attempts to send a close_notify alert before tearing down
+// the underlying conn, so we let that happen first (via engineConn.Write)
+// and only mark the bridge closed once engineConn.Close runs; marking it
+// closed up front would make the close_notify write fail immediately.
+func (b *tlsBridge) close() error {
+	return b.conn.Close()
+}
+
+// engineConn adapts tlsBridge's internal buffers to the net.Conn interface
+// crypto/tls needs to drive the handshake and record layer.
+type engineConn struct {
+	b *tlsBridge
+}
+
+// Read blocks until inbound bytes are available, the bridge is closed, or
+// an EAP-side error occurs.
+func (c engineConn) Read(p []byte) (int, error) {
+	b := c.b
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for b.inbound.Len() == 0 && !b.closed {
+		b.cond.Wait()
+	}
+	if b.inbound.Len() == 0 && b.closed {
+		return 0, io.EOF
+	}
+	return b.inbound.Read(p)
+}
+
+// Write appends engine-produced TLS bytes to the outbound buffer; it never
+// blocks.
+func (c engineConn) Write(p []byte) (int, error) {
+	b := c.b
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return 0, io.ErrClosedPipe
+	}
+	return b.outbound.Write(p)
+}
+
+func (c engineConn) Close() error {
+	b := c.b
+	b.mu.Lock()
+	b.closed = true
+	b.cond.Broadcast()
+	b.mu.Unlock()
+	return nil
+}
+
+func (c engineConn) LocalAddr() net.Addr                { return ttlsEngineAddr{} }
+func (c engineConn) RemoteAddr() net.Addr               { return ttlsEngineAddr{} }
+func (c engineConn) SetDeadline(t time.Time) error      { return nil }
+func (c engineConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c engineConn) SetWriteDeadline(t time.Time) error { return nil }
+
+// ttlsEngineAddr is a placeholder net.Addr: the TLS engine never touches a
+// real socket, so addresses are meaningless here.
+type ttlsEngineAddr struct{}
+
+func (ttlsEngineAddr) Network() string { return "eap-ttls" }
+func (ttlsEngineAddr) String() string  { return "eap-ttls-bridge" }
