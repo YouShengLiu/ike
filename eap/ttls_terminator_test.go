@@ -56,6 +56,62 @@ func TestTerminatorFullPapFlowSmallMTU(t *testing.T) {
 	}
 }
 
+// TestTerminatorCloseNilSafeBeforeProcess proves Close is safe to call on a
+// Terminator that has never had Process called on it (no bridge exists yet).
+func TestTerminatorCloseNilSafeBeforeProcess(t *testing.T) {
+	term := NewTerminator(testTLSServerConfig(t), 1000)
+	if err := term.Close(); err != nil {
+		t.Fatalf("Close on a never-Processed Terminator returned %v, want nil", err)
+	}
+	// A nil *Terminator must also be safe (defensive, mirrors common Close
+	// idioms elsewhere in the stdlib/ecosystem).
+	var nilTerm *Terminator
+	if err := nilTerm.Close(); err != nil {
+		t.Fatalf("Close on a nil *Terminator returned %v, want nil", err)
+	}
+}
+
+// TestTerminatorCloseAbandonedMidHandshakeDoesNotHang proves the leak fix:
+// if a caller abandons an authentication mid-handshake (e.g. the peer
+// vanished), Close reaps the bridge's background handshake goroutine
+// instead of leaving it parked in engineConn.Read forever. It also proves
+// Close is idempotent (safe to call twice).
+func TestTerminatorCloseAbandonedMidHandshakeDoesNotHang(t *testing.T) {
+	term := NewTerminator(testTLSServerConfig(t), 1000)
+
+	// Start the handshake (creates the bridge) but never feed it a
+	// ClientHello -- the peer "vanished". Before the fix, only the
+	// Done/Success path in Process called bridge.close(), so this
+	// Terminator's bridge goroutine would stay blocked forever.
+	if _, err := term.Process(nil); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- term.Close() }()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close on an abandoned mid-handshake Terminator returned %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within 2s; bridge goroutine likely leaked")
+	}
+
+	// Idempotent: a second Close must also return promptly without error.
+	closeAgainDone := make(chan error, 1)
+	go func() { closeAgainDone <- term.Close() }()
+	select {
+	case err := <-closeAgainDone:
+		if err != nil {
+			t.Fatalf("second Close call returned %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Close did not return within 2s")
+	}
+}
+
 // runTtlsPeer is a test harness that plays the EAP-TTLS peer (supplicant)
 // role: it drives a real tls.Client through the Terminator's Process calls
 // (including EAP-layer fragmentation in both directions), completes the TLS

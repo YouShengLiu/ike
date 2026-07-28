@@ -71,6 +71,12 @@ type Terminator struct {
 	// outFirst is true exactly when the next fragment emitOutbound sends is
 	// the first fragment of outTotal's message.
 	outFirst bool
+
+	// closed guards Close so it is idempotent: bridge.close() itself is not
+	// documented as safe to call twice, and repeated calls happen naturally
+	// (e.g. a caller's own error-handling path calling Close after Process
+	// already closed the bridge on an error-return).
+	closed bool
 }
 
 // NewTerminator creates a Terminator for one EAP-TTLS authentication. mtu is
@@ -78,6 +84,27 @@ type Terminator struct {
 // larger bridge output is fragmented across multiple packets.
 func NewTerminator(cfg *tls.Config, mtu int) *Terminator {
 	return &Terminator{cfg: cfg, mtu: mtu, state: ttlsStateStart}
+}
+
+// Close releases the underlying TLS engine, if one has been started. It is
+// nil-safe (a Terminator on which Process has never been called has no
+// bridge yet) and idempotent (safe to call more than once, including after
+// Process has already closed the bridge itself on the Done/Success path or
+// on an error path).
+//
+// Callers MUST call Close if an authentication is abandoned before
+// reaching Done -- e.g. the peer disappears mid-handshake, or the caller
+// gives up after some number of retries -- since the bridge's background
+// handshake goroutine (started in newTLSBridge) otherwise stays parked in
+// engineConn.Read forever, waiting for input that will never arrive.
+// bridge.close() unblocks it (Close -> cond.Broadcast -> Read returns
+// io.EOF -> HandshakeContext returns -> goroutine exits).
+func (t *Terminator) Close() error {
+	if t == nil || t.bridge == nil || t.closed {
+		return nil
+	}
+	t.closed = true
+	return t.bridge.close()
 }
 
 // TerminatorStep is the result of one Process call.
@@ -93,7 +120,19 @@ type TerminatorStep struct {
 // with inTypeData == nil to obtain the initial TTLS-Start packet, then once
 // per subsequent EAP-Response received from the peer, feeding that
 // response's EAP-TTLS type-data (starting at the Type byte) as inTypeData.
-func (t *Terminator) Process(inTypeData []byte) (*TerminatorStep, error) {
+func (t *Terminator) Process(inTypeData []byte) (result *TerminatorStep, err error) {
+	// Any error return from here on means this authentication attempt is
+	// broken and the caller will abandon this Terminator -- close the
+	// bridge so its background handshake goroutine doesn't stay parked in
+	// engineConn.Read forever. Close is idempotent/nil-safe, so this is
+	// harmless to run even on paths that already closed the bridge
+	// themselves (e.g. the Done/Success path below).
+	defer func() {
+		if err != nil {
+			_ = t.Close()
+		}
+	}()
+
 	switch t.state {
 	case ttlsStateStart:
 		t.bridge = newTLSBridge(t.cfg)
