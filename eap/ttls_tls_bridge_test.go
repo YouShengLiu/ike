@@ -194,6 +194,50 @@ func newMemConnPair() (net.Conn, *feedConn) {
 	return client, feed
 }
 
+// shuttle pumps TLS bytes between a bridge and the real tls.Client on the
+// other end of feed until clientDone reports the client-side operation
+// (Handshake, or a Handshake+Write, etc.) has completed, or the deadline
+// expires. It fatals the test on any transport error or timeout.
+//
+// Callers MUST wait on clientDone -- the client's own completion signal --
+// rather than on bridge.handshakeDone(). The server's final handshake
+// flight (ChangeCipherSpec+Finished) is written into the bridge's outbound
+// buffer synchronously, just before its Handshake() call returns and
+// hsDone is set; a naive "for !bridge.handshakeDone() { pump }" loop can
+// observe hsDone==true and exit without ever draining that last flight out
+// to the client, leaving the real tls.Client hanging forever. Pumping until
+// clientDone fires guarantees every flight the client is waiting on has
+// actually been delivered. Task 4/5 tests driving this bridge against a
+// real tls.Client should reuse this helper rather than re-deriving the
+// pump loop.
+func shuttle(t *testing.T, bridge *tlsBridge, feed *feedConn, clientDone <-chan error) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		if out := bridge.readOutbound(); len(out) > 0 {
+			if err := feed.writeToClient(out); err != nil {
+				t.Fatalf("writeToClient: %v", err)
+			}
+		}
+		if in := feed.readFromClient(); len(in) > 0 {
+			if err := bridge.writeInbound(in); err != nil {
+				t.Fatalf("writeInbound: %v", err)
+			}
+		}
+		select {
+		case err := <-clientDone:
+			if err != nil {
+				t.Fatalf("client operation failed: %v", err)
+			}
+			return
+		case <-deadline:
+			t.Fatal("shuttle timed out waiting for client completion")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
 // ---- tests ----
 
 func TestTLSBridgeHandshakeWithRealClient(t *testing.T) {
@@ -213,39 +257,7 @@ func TestTLSBridgeHandshakeWithRealClient(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- client.HandshakeContext(context.Background()) }()
 
-	// Shuttle bytes between the real client and the bridge. Note: we pump
-	// until the *client* reports completion, not until bridge.handshakeDone()
-	// flips true. The server's final flight (ChangeCipherSpec+Finished) is
-	// written to the bridge's outbound buffer synchronously, just before its
-	// Handshake() call returns and hsDone is set -- so a naive
-	// "for !bridge.handshakeDone() { pump }" loop can observe hsDone==true
-	// and exit without ever draining that last flight to the client.
-	deadline := time.After(5 * time.Second)
-	var clientErr error
-pump:
-	for {
-		if out := bridge.readOutbound(); len(out) > 0 {
-			if err := serverFeed.writeToClient(out); err != nil {
-				t.Fatalf("writeToClient: %v", err)
-			}
-		}
-		if in := serverFeed.readFromClient(); len(in) > 0 {
-			if err := bridge.writeInbound(in); err != nil {
-				t.Fatalf("writeInbound: %v", err)
-			}
-		}
-		select {
-		case clientErr = <-done:
-			break pump
-		case <-deadline:
-			t.Fatal("handshake timed out")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	if clientErr != nil {
-		t.Fatalf("client handshake failed: %v", clientErr)
-	}
+	shuttle(t, bridge, serverFeed, done)
 
 	// The bridge's own Handshake() call returns essentially in lock-step
 	// with producing that final flight, so it should already be done; allow
@@ -284,33 +296,7 @@ func TestTLSBridgeApplicationDataRoundTrip(t *testing.T) {
 	hsDone := make(chan error, 1)
 	go func() { hsDone <- client.HandshakeContext(context.Background()) }()
 
-	// See TestTLSBridgeHandshakeWithRealClient for why we pump until the
-	// client reports completion rather than until bridge.handshakeDone().
-	deadline := time.After(5 * time.Second)
-pump:
-	for {
-		if out := bridge.readOutbound(); len(out) > 0 {
-			if err := serverFeed.writeToClient(out); err != nil {
-				t.Fatalf("writeToClient: %v", err)
-			}
-		}
-		if in := serverFeed.readFromClient(); len(in) > 0 {
-			if err := bridge.writeInbound(in); err != nil {
-				t.Fatalf("writeInbound: %v", err)
-			}
-		}
-		select {
-		case err := <-hsDone:
-			if err != nil {
-				t.Fatalf("client handshake failed: %v", err)
-			}
-			break pump
-		case <-deadline:
-			t.Fatal("handshake timed out")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
+	shuttle(t, bridge, serverFeed, hsDone)
 
 	// Client sends application data through the tunnel to the bridge.
 	appWriteDone := make(chan error, 1)
@@ -365,5 +351,44 @@ pump:
 
 	if string(got) != "hello inner AVP" {
 		t.Fatalf("readAppData = %q, want %q", got, "hello inner AVP")
+	}
+}
+
+// TestTLSBridgeCloseUnblocksReadAppData proves the specific concurrency
+// property this bridge exists to guarantee: a goroutine parked in
+// readAppData() (waiting on the internal condition variable because no
+// inbound TLS bytes have been delivered yet) must be woken up by close(),
+// not left hanging forever. If engineConn.Close's cond.Broadcast were ever
+// dropped or misrouted, this test would hang until the -timeout kills the
+// whole test binary rather than failing cleanly -- so it uses its own
+// bounded select/timeout to fail promptly and informatively instead.
+func TestTLSBridgeCloseUnblocksReadAppData(t *testing.T) {
+	serverCfg := testTLSServerConfig(t)
+	bridge := newTLSBridge(serverCfg)
+
+	// No writeInbound has happened yet, so this call blocks in engineConn.Read
+	// waiting on the condition variable.
+	readResult := make(chan error, 1)
+	go func() {
+		_, err := bridge.readAppData()
+		readResult <- err
+	}()
+
+	// Give the goroutine a moment to actually reach the blocking wait before
+	// closing, so this test exercises the "already blocked" case rather than
+	// racing close() ahead of the Read call.
+	time.Sleep(20 * time.Millisecond)
+
+	if err := bridge.close(); err != nil {
+		t.Logf("bridge close: %v", err)
+	}
+
+	select {
+	case err := <-readResult:
+		if err == nil {
+			t.Fatal("readAppData returned nil error after close, want a non-nil error (e.g. io.EOF)")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readAppData did not unblock within 2s after close(); cond.Broadcast likely missing/misrouted")
 	}
 }

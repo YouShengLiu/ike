@@ -120,6 +120,14 @@ func (b *tlsBridge) readAppData() ([]byte, error) {
 // the underlying conn, so we let that happen first (via engineConn.Write)
 // and only mark the bridge closed once engineConn.Close runs; marking it
 // closed up front would make the close_notify write fail immediately.
+// engineConn.Close's cond.Broadcast is what unblocks any goroutine parked
+// in engineConn.Read (e.g. a caller blocked in readAppData), so it returns
+// promptly with io.EOF instead of hanging forever.
+//
+// Note: close() returning does not imply the handshake goroutine started in
+// newTLSBridge has exited yet -- that goroutine observes the close
+// asynchronously (via the same Read unblocking) and updates hsDone/hsErr on
+// its own schedule shortly after.
 func (b *tlsBridge) close() error {
 	return b.conn.Close()
 }
