@@ -1,6 +1,7 @@
 package eap
 
 import (
+	"bytes"
 	"encoding/binary"
 
 	"github.com/pkg/errors"
@@ -70,7 +71,11 @@ func ParsePapAVPs(b []byte) (*PapCredential, error) {
 			case avpCodeUserName:
 				cred.UserName = append([]byte(nil), data...)
 			case avpCodeUserPassword:
-				cred.UserPassword = append([]byte(nil), data...)
+				// RFC 5281 §11.2.2: the PAP password is zero-padded to a
+				// 16-octet boundary to obfuscate its length, and the AVP
+				// Length counts the padding. Strip trailing NULs to recover
+				// the cleartext (a text password never ends in NUL).
+				cred.UserPassword = append([]byte(nil), bytes.TrimRight(data, "\x00")...)
 			}
 		}
 		// Advance to next 4-byte-aligned AVP.

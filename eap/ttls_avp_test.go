@@ -54,6 +54,35 @@ func TestParsePapAVPsRoundTrip(t *testing.T) {
 	}
 }
 
+// papPad replicates wpa_supplicant's RFC 5281 §11.2.2 PAP password padding:
+// the User-Password is zero-padded to the next 16-octet boundary to obfuscate
+// its length, and the AVP Length field counts the padding (eap_ttls.c).
+func papPad(pw string) []byte {
+	b := []byte(pw)
+	pad := 16
+	if len(b) != 0 {
+		pad = (16 - (len(b) & 15)) & 15
+	}
+	return append(b, make([]byte, pad)...)
+}
+
+// TestParsePapAVPsStripsPasswordPadding proves a real supplicant's zero-padded
+// User-Password (13-byte password -> 16-byte padded AVP value) is recovered as
+// the original cleartext, not the padded bytes. Without stripping, credential
+// verification against any compliant TTLS/PAP client fails.
+func TestParsePapAVPsStripsPasswordPadding(t *testing.T) {
+	const pw = "Twif@Test1234" // 13 bytes -> 3 NUL pad
+	buf := append(encodeAVP(avpCodeUserName, true, []byte("alice")),
+		encodeAVP(avpCodeUserPassword, true, papPad(pw))...)
+	cred, err := ParsePapAVPs(buf)
+	if err != nil {
+		t.Fatalf("ParsePapAVPs error = %v", err)
+	}
+	if string(cred.UserPassword) != pw {
+		t.Fatalf("UserPassword = %q, want %q (padding not stripped)", cred.UserPassword, pw)
+	}
+}
+
 func TestParsePapAVPsMissingPassword(t *testing.T) {
 	buf := encodeAVP(avpCodeUserName, true, []byte("alice"))
 	if _, err := ParsePapAVPs(buf); err == nil {
