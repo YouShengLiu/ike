@@ -297,7 +297,7 @@ func TestEapAkaPrimeAttrLength(t *testing.T) {
 			attrType:         AT_KDF_INPUT,
 			value:            []byte("test.free5gc.org"),
 			expectedLen:      5,
-			expectedReserved: uint16(len("test.free5gc.org") * 8),
+			expectedReserved: uint16(len("test.free5gc.org")),
 		},
 	}
 
@@ -375,7 +375,7 @@ func TestEapAkaPrimeMarshal(t *testing.T) {
 				byte(SubtypeAkaIdentity), // Subtype
 				0x00, 0x00,               // Reserved
 				0x17, 0x04, // AT_KDF_INPUT header (type=23, length=4)
-				0x00, 0x58, // AT_KDF_INPUT reserved (88 bits)
+				0x00, 0x0b, // AT_KDF_INPUT reserved (11 bytes)
 				'f', 'r', 'e', 'e', '5', 'g', 'c', '.', 'o', 'r', 'g', // AT_KDF_INPUT value
 				0x00,                   // Padding
 				0x18, 0x01, 0x00, 0x01, // AT_KDF (type=24, length=1)
@@ -530,7 +530,7 @@ func TestEapAkaPrimeUnmarshal(t *testing.T) {
 				byte(SubtypeAkaIdentity), // Subtype
 				0x00, 0x00,               // Reserved
 				0x17, 0x04, // AT_KDF_INPUT header (type=23, length=4)
-				0x00, 0x58, // AT_KDF_INPUT reserved (88 bits)
+				0x00, 0x0b, // AT_KDF_INPUT reserved (11 bytes)
 				'f', 'r', 'e', 'e', '5', 'g', 'c', '.', 'o', 'r', 'g', // AT_KDF_INPUT value
 				0x00,                   // Padding
 				0x18, 0x01, 0x00, 0x01, // AT_KDF (type=24, length=1, value=1)

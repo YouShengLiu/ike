@@ -282,7 +282,49 @@ func (eapAkaPrime *EapAkaPrime) Unmarshal(rawData []byte) error {
 				return errors.Wrapf(err, "EAP-AKA' Unmarshal(): read %s attribute/value failed", attr.attrType)
 			}
 		case AT_KDF_INPUT:
-			fallthrough
+			// For AT_KDF_INPUT, the reserved field is the actual network name
+			// length in bytes, not bits.
+			reserved := make([]byte, EapAkaAttrReservedLen)
+			n, err = io.ReadFull(bufReader, reserved)
+			if n != EapAkaAttrReservedLen {
+				return errors.Errorf("EAP-AKA' Unmarshal(): incomplete reserved bytes for %s", attr.attrType)
+			}
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return errors.Wrapf(err, "EAP-AKA' Unmarshal(): read %s attribute/reserved failed", attr.attrType)
+			}
+
+			valBytesLen := binary.BigEndian.Uint16(reserved)
+			attr.reserved = valBytesLen
+
+			totalLen := uint16(attr.length * 4)
+			paddingLen := totalLen - valBytesLen - EapAkaAttrTypeLen - EapAkaAttrLengthLen - EapAkaAttrReservedLen
+
+			attr.value = make([]byte, valBytesLen)
+			n, err = io.ReadFull(bufReader, attr.value)
+			if n != int(valBytesLen) {
+				return errors.Errorf("EAP-AKA' Unmarshal(): %s attribute value length mismatch, "+
+					"expect %d bytes but got %d bytes",
+					attr.attrType, valBytesLen, n,
+				)
+			}
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return errors.Wrapf(err, "EAP-AKA' Unmarshal(): read %s attribute/value failed", attr.attrType)
+			}
+
+			// Handle padding
+			if paddingLen > 0 {
+				padding := make([]byte, paddingLen)
+				_, err = io.ReadFull(bufReader, padding)
+				if err != nil {
+					return errors.Wrapf(err, "EAP-AKA' Unmarshal(): read %s attribute/padding failed", attr.attrType)
+				}
+			}
 		case AT_RES:
 			// In this case, reserved will contains the actual length of value
 
@@ -539,7 +581,15 @@ func (attr *EapAkaPrimeAttr) setAttr(attrType EapAkaPrimeAttrType, value []byte)
 		// .                                                               .
 		// |                                                               |
 		// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-		fallthrough
+		valBytesLen := len(value)
+		totalLen := EapAkaAttrTypeLen + EapAkaAttrLengthLen + EapAkaAttrReservedLen + valBytesLen
+		paddingBytes := (4 - (totalLen % 4)) % 4
+
+		attr.reserved = uint16(valBytesLen) // The unit of reserved is byte
+		attr.length = uint8((totalLen + paddingBytes) / 4)
+
+		attr.value = make([]byte, valBytesLen+paddingBytes)
+		copy(attr.value, value)
 	case AT_RES:
 		// RFC 4187:
 		//    The value field of this attribute begins with the 2-byte RES Length,
