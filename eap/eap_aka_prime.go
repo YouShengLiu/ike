@@ -84,9 +84,10 @@ func (t EapAkaPrimeAttrType) Value() uint8 { return uint8(t) }
 var _ EapTypeData = &EapAkaPrime{}
 
 type EapAkaPrime struct {
-	subType    EapAkaSubtype
-	reserved   uint16
-	attributes map[EapAkaPrimeAttrType]*EapAkaPrimeAttr
+	subType        EapAkaSubtype
+	reserved       uint16
+	attributes     map[EapAkaPrimeAttrType]*EapAkaPrimeAttr
+	attributeOrder []EapAkaPrimeAttrType
 }
 
 func NewEapAkaPrime(subType EapAkaSubtype) *EapAkaPrime {
@@ -112,6 +113,9 @@ func (eapAkaPrime *EapAkaPrime) SetAttr(attrType EapAkaPrimeAttrType, value []by
 		return errors.Wrapf(err, "EAP-AKA' SetAttr failed")
 	}
 
+	if _, exists := eapAkaPrime.attributes[attr.attrType]; !exists && eapAkaPrime.attributeOrder != nil {
+		eapAkaPrime.attributeOrder = append(eapAkaPrime.attributeOrder, attr.attrType)
+	}
 	eapAkaPrime.attributes[attr.attrType] = attr
 	return nil
 }
@@ -210,9 +214,8 @@ func (eapAkaPrime *EapAkaPrime) Unmarshal(rawData []byte) error {
 	}
 	eapAkaPrime.reserved = binary.BigEndian.Uint16(buf)
 
-	if eapAkaPrime.attributes == nil {
-		eapAkaPrime.attributes = map[EapAkaPrimeAttrType]*EapAkaPrimeAttr{}
-	}
+	eapAkaPrime.attributes = map[EapAkaPrimeAttrType]*EapAkaPrimeAttr{}
+	eapAkaPrime.attributeOrder = make([]EapAkaPrimeAttrType, 0)
 
 	for {
 		attr := new(EapAkaPrimeAttr)
@@ -450,6 +453,9 @@ func (eapAkaPrime *EapAkaPrime) Unmarshal(rawData []byte) error {
 		}
 
 		// Set attribute
+		if _, exists := eapAkaPrime.attributes[attr.attrType]; !exists {
+			eapAkaPrime.attributeOrder = append(eapAkaPrime.attributeOrder, attr.attrType)
+		}
 		eapAkaPrime.attributes[attr.attrType] = attr
 	}
 
@@ -462,6 +468,10 @@ func (eapAkaPrime *EapAkaPrime) initMAC() error {
 }
 
 func (eapAkaPrime *EapAkaPrime) getAttrsKeys() []EapAkaPrimeAttrType {
+	if eapAkaPrime.attributeOrder != nil {
+		return eapAkaPrime.attributeOrder
+	}
+
 	result := make([]EapAkaPrimeAttrType, 0, len(eapAkaPrime.attributes))
 
 	for key := range eapAkaPrime.attributes {

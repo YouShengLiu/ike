@@ -345,3 +345,23 @@ func TestEapAkaMac(t *testing.T) {
 		})
 	}
 }
+
+func TestEapAkaMacPreservesReceivedAttributeOrder(t *testing.T) {
+	packet, err := hex.DecodeString(
+		"02ab002c32010000" +
+			"03030040c4532b691a62a48c" +
+			"86010000" +
+			"0b050000d5300e0989ee0bbd17d642b1f4abeeb6",
+	)
+	require.NoError(t, err)
+
+	key, err := hex.DecodeString("36ba2ad66f240be3fc8e793f91d5d39953c07c45232b65b8e2f6cc5c06d3b9d0")
+	require.NoError(t, err)
+
+	var eap eap_message.EAP
+	require.NoError(t, eap.Unmarshal(packet))
+
+	mac, err := eap.CalcEapAkaPrimeAtMAC(key)
+	require.NoError(t, err)
+	require.Equal(t, "d5300e0989ee0bbd17d642b1f4abeeb6", hex.EncodeToString(mac))
+}
