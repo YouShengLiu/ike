@@ -282,7 +282,11 @@ func (t *Terminator) finishInner(app []byte) (*TerminatorStep, error) {
 		return nil, errors.Wrap(err, "Terminator: derive keys")
 	}
 	t.state = ttlsStateDone
-	_ = t.bridge.close()
+	// Close through the terminator, not the bridge directly: this marks the
+	// terminator closed so the caller's own Close (callers are told to always
+	// call it) stays a no-op instead of hitting an already-closed connection
+	// and reporting "use of closed network connection" on every success.
+	_ = t.Close()
 	return &TerminatorStep{Done: true, Success: true, Cred: cred, Keys: keys}, nil
 }
 
