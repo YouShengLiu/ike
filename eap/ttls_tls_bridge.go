@@ -34,6 +34,7 @@ type tlsBridge struct {
 	hsDone   bool
 	hsErr    error
 	closed   bool
+	appCh    chan appDataChunk // decrypted inner data, fed by appDataPump's goroutine
 }
 
 // newTLSBridge starts a server-side TLS handshake in the background. The
@@ -107,12 +108,68 @@ func (b *tlsBridge) connState() tls.ConnectionState {
 // or the bridge is closed. Callers must have already delivered the
 // corresponding TLS record(s) via writeInbound before calling this.
 func (b *tlsBridge) readAppData() ([]byte, error) {
-	buf := make([]byte, 16384)
-	n, err := b.conn.Read(buf)
-	if err != nil && err != io.EOF {
-		return nil, err
+	r, ok := <-b.appDataPump()
+	if !ok {
+		return nil, io.EOF
 	}
-	return buf[:n], err
+	return r.data, r.err
+}
+
+// takeAppData returns decrypted application data that is already available,
+// waiting at most d for the engine to surface it. Unlike readAppData it
+// never blocks indefinitely: no data within d is reported as no data, not
+// as an error. RFC 9427 Section 3 requires this check once the TLS session
+// is established, because a TLS 1.3 peer may send its Finished and its
+// first inner records together.
+func (b *tlsBridge) takeAppData(d time.Duration) ([]byte, error) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case r, ok := <-b.appDataPump():
+		if !ok {
+			return nil, io.EOF
+		}
+		return r.data, r.err
+	case <-timer.C:
+		return nil, nil
+	}
+}
+
+type appDataChunk struct {
+	data []byte
+	err  error
+}
+
+// appDataPump lazily starts the single goroutine that drains decrypted
+// application data off the TLS engine, and returns its channel. A dedicated
+// goroutine is what lets takeAppData impose a deadline: tls.Conn.Read
+// cannot be bounded here, because engineConn deliberately ignores read
+// deadlines -- a deadline error would put tls.Conn into a permanent error
+// state and kill the session.
+func (b *tlsBridge) appDataPump() <-chan appDataChunk {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.appCh == nil {
+		ch := make(chan appDataChunk, 4)
+		b.appCh = ch
+		go func() {
+			defer close(ch)
+			for {
+				buf := make([]byte, 16384)
+				n, err := b.conn.Read(buf)
+				if n > 0 {
+					ch <- appDataChunk{data: buf[:n]}
+				}
+				if err != nil {
+					if err != io.EOF {
+						ch <- appDataChunk{err: err}
+					}
+					return
+				}
+			}
+		}()
+	}
+	return b.appCh
 }
 
 // close tears down the TLS engine and unblocks any in-progress reads.

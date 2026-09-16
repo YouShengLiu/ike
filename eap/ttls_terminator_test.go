@@ -120,6 +120,21 @@ func TestTerminatorCloseAbandonedMidHandshakeDoesNotHang(t *testing.T) {
 // extracted credential and keys, failing the test on any error or timeout.
 func runTtlsPeer(t *testing.T, term *Terminator, start *TerminatorStep, username, password string, timeout time.Duration) (*PapCredential, *TtlsKeys) {
 	t.Helper()
+	return runTtlsPeerObserved(t, term, start, username, password, timeout, nil)
+}
+
+// runTtlsPeerObserved is runTtlsPeer with a hook that sees every step the
+// terminator produces, so a test can assert on intermediate steps and not
+// just on the final credential.
+func runTtlsPeerObserved(
+	t *testing.T, term *Terminator, start *TerminatorStep, username, password string,
+	timeout time.Duration, observe func(*TerminatorStep),
+) (*PapCredential, *TtlsKeys) {
+	t.Helper()
+	if observe == nil {
+		observe = func(*TerminatorStep) {}
+	}
+	observe(start)
 
 	// term.cfg/term.mtu are accessed directly since this harness lives in
 	// the same package -- it needs a client config that trusts the same
@@ -197,6 +212,7 @@ func runTtlsPeer(t *testing.T, term *Terminator, start *TerminatorStep, username
 		if err != nil {
 			t.Fatalf("term.Process: %v", err)
 		}
+		observe(next)
 		step = next
 	}
 }

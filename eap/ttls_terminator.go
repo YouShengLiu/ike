@@ -17,6 +17,14 @@ import (
 // silent hang.
 const bridgeOutputTimeout = 3 * time.Second
 
+// innerProbeTimeout bounds the post-handshake check for inner data that RFC
+// 9427 Section 3 mandates. It is a grace period for the TLS engine to
+// surface records that arrived with the peer's Finished, not a wait for the
+// peer: a peer that sends its inner data in a separate packet (TLS 1.2
+// always, TLS 1.3 peers such as wpa_supplicant) simply costs this much once
+// per authentication.
+const innerProbeTimeout = 250 * time.Millisecond
+
 // ttlsState tracks where a single EAP-TTLS authentication is in its
 // lifecycle: before anything has been sent, mid-handshake, waiting for the
 // tunneled inner (PAP) data once the handshake has completed, or finished.
@@ -114,6 +122,14 @@ type TerminatorStep struct {
 	Success     bool
 	Cred        *PapCredential
 	Keys        *TtlsKeys
+
+	// AwaitingInner marks the step where the TLS handshake has completed but
+	// the peer has not sent its inner AVPs, so OutTypeData is only a prompt
+	// for them. Peers that send inner data in their own packet (every TLS
+	// 1.2 peer, and TLS 1.3 peers such as wpa_supplicant) legitimately pass
+	// through this state; a peer that abandons the authentication also stops
+	// here, which is why callers should log it. Never set together with Done.
+	AwaitingInner bool
 }
 
 // Process advances the EAP-TTLS state machine by one step. Call it first
@@ -201,17 +217,7 @@ func (t *Terminator) Process(inTypeData []byte) (result *TerminatorStep, err err
 			if len(app) == 0 {
 				return nil, errors.Errorf("Terminator: expected inner data, got none")
 			}
-			cred, err := ParsePapAVPs(app)
-			if err != nil {
-				return nil, errors.Wrap(err, "Terminator: parse PAP")
-			}
-			keys, err := DeriveTtlsKeys(t.bridge.connState())
-			if err != nil {
-				return nil, errors.Wrap(err, "Terminator: derive keys")
-			}
-			t.state = ttlsStateDone
-			_ = t.bridge.close()
-			return &TerminatorStep{Done: true, Success: true, Cred: cred, Keys: keys}, nil
+			return t.finishInner(app)
 		}
 
 		// Flush whatever the bridge has queued as output this round (the
@@ -241,12 +247,43 @@ func (t *Terminator) Process(inTypeData []byte) (result *TerminatorStep, err err
 				return nil, errors.Wrap(err, "Terminator: handshake failed")
 			}
 			t.state = ttlsStateInner
+
+			// RFC 9427 Section 3: once the TLS session is established the
+			// server MUST check for application data BEFORE starting
+			// another round trip. A TLS 1.3 peer may carry its Finished
+			// and its inner AVPs in one EAP packet (Windows 11 does), and
+			// answering such a packet with another request instead of the
+			// authentication result leaves the peer waiting forever.
+			inner, err := t.bridge.takeAppData(innerProbeTimeout)
+			if err != nil && err != io.EOF {
+				return nil, errors.Wrap(err, "Terminator: probe inner")
+			}
+			if len(inner) > 0 {
+				return t.finishInner(inner)
+			}
+			step.AwaitingInner = true
 		}
 		return step, nil
 
 	default:
 		return nil, errors.Errorf("Terminator: Process called in terminal state")
 	}
+}
+
+// finishInner parses the peer's inner PAP AVPs, derives the keying material
+// and completes the authentication.
+func (t *Terminator) finishInner(app []byte) (*TerminatorStep, error) {
+	cred, err := ParsePapAVPs(app)
+	if err != nil {
+		return nil, errors.Wrap(err, "Terminator: parse PAP")
+	}
+	keys, err := DeriveTtlsKeys(t.bridge.connState())
+	if err != nil {
+		return nil, errors.Wrap(err, "Terminator: derive keys")
+	}
+	t.state = ttlsStateDone
+	_ = t.bridge.close()
+	return &TerminatorStep{Done: true, Success: true, Cred: cred, Keys: keys}, nil
 }
 
 // emitOutbound takes pending TLS bytes produced by the bridge and returns
