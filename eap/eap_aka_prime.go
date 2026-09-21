@@ -595,8 +595,15 @@ func (attr *EapAkaPrimeAttr) setAttr(attrType EapAkaPrimeAttrType, value []byte)
 		totalLen := EapAkaAttrTypeLen + EapAkaAttrLengthLen + EapAkaAttrReservedLen + valBytesLen
 		paddingBytes := (4 - (totalLen % 4)) % 4
 
+		if valBytesLen > math.MaxUint16 {
+			return errors.Errorf("eap aka prime attr bytes length overflow")
+		}
 		attr.reserved = uint16(valBytesLen) // The unit of reserved is byte
-		attr.length = uint8((totalLen + paddingBytes) / 4)
+		calcTotalLen := (totalLen + paddingBytes) / 4
+		if calcTotalLen > math.MaxUint8 {
+			return errors.Errorf("eap aka prime attr length overflow (padding)")
+		}
+		attr.length = uint8(calcTotalLen)
 
 		attr.value = make([]byte, valBytesLen+paddingBytes)
 		copy(attr.value, value)
