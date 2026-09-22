@@ -389,3 +389,26 @@ func TestTerminatorEmptyPacketsInInnerStateEventuallyFail(t *testing.T) {
 		t.Fatal("terminator not closed after round-cap error")
 	}
 }
+
+// TestTerminatorRejectsOversizedInboundMessage: a peer streaming M-flagged
+// fragments must be cut off once the reassembly buffer exceeds the cap.
+func TestTerminatorRejectsOversizedInboundMessage(t *testing.T) {
+	term := NewTerminator(testTLSServerConfig(t), 0)
+	if _, err := term.Process(nil); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	frag, err := (&EapTtls{Flags: EapTlsFlagMoreFragments, TLSData: make([]byte, 4096)}).Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var lastErr error
+	for i := 0; i < maxInboundMessage/4096+2 && lastErr == nil; i++ {
+		_, lastErr = term.Process(frag)
+	}
+	if lastErr == nil {
+		t.Fatal("expected error once inbound exceeds maxInboundMessage, got nil")
+	}
+	if !term.closed {
+		t.Fatal("terminator not closed after oversize error")
+	}
+}

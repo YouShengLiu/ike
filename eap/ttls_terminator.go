@@ -32,6 +32,12 @@ const innerProbeTimeout = 250 * time.Millisecond
 // ack) before giving up. A conforming peer needs zero such rounds.
 const maxInnerRounds = 3
 
+// maxInboundMessage caps the reassembly buffer for one inbound TLS message.
+// The peer's flights are a few KiB in the common case (no client
+// certificate); this only stops a peer from streaming M-flagged fragments
+// without bound.
+const maxInboundMessage = 64 << 10
+
 // ttlsState tracks where a single EAP-TTLS authentication is in its
 // lifecycle: before anything has been sent, mid-handshake, waiting for the
 // tunneled inner (PAP) data once the handshake has completed, or finished.
@@ -188,6 +194,9 @@ func (t *Terminator) Process(inTypeData []byte) (result *TerminatorStep, err err
 
 		// Reassemble the peer's (possibly fragmented) inbound message.
 		t.inPending = append(t.inPending, pkt.TLSData...)
+		if len(t.inPending) > maxInboundMessage {
+			return nil, errors.Errorf("Terminator: inbound message exceeds %d bytes", maxInboundMessage)
+		}
 		if pkt.Flags&EapTlsFlagMoreFragments != 0 {
 			ack := &EapTtls{}
 			out, err := ack.Marshal()
