@@ -6,6 +6,12 @@ import (
 	"testing"
 )
 
+// Inner PAP identity/password shared by the EAP-TTLS tests.
+const (
+	testUserName = "alice"
+	testPassword = "s3cret"
+)
+
 // encodeVendorAVP builds one vendor-specific Diameter AVP (V flag set, with
 // a 4-byte Vendor-Id ahead of data), padded to a 4-byte boundary. Unlike
 // encodeAVP (Task 2's non-vendor helper), this is test-only scaffolding for
@@ -16,9 +22,9 @@ func encodeVendorAVP(code, vendorID uint32, data []byte) []byte {
 	out := make([]byte, avpHeaderLen)
 	binary.BigEndian.PutUint32(out[0:4], code)
 	out[4] = avpFlagVendor
-	out[5] = byte(length >> 16)
-	out[6] = byte(length >> 8)
-	out[7] = byte(length)
+	out[5] = byte(length >> 16 & 0xff)
+	out[6] = byte(length >> 8 & 0xff)
+	out[7] = byte(length & 0xff)
 	vid := make([]byte, 4)
 	binary.BigEndian.PutUint32(vid, vendorID)
 	out = append(out, vid...)
@@ -43,13 +49,13 @@ func TestEncodeAVPPaddingAndLength(t *testing.T) {
 }
 
 func TestParsePapAVPsRoundTrip(t *testing.T) {
-	buf := append(encodeAVP(avpCodeUserName, true, []byte("alice")),
-		encodeAVP(avpCodeUserPassword, true, []byte("s3cret"))...)
+	buf := append(encodeAVP(avpCodeUserName, true, []byte(testUserName)),
+		encodeAVP(avpCodeUserPassword, true, []byte(testPassword))...)
 	cred, err := ParsePapAVPs(buf)
 	if err != nil {
 		t.Fatalf("ParsePapAVPs error = %v", err)
 	}
-	if string(cred.UserName) != "alice" || string(cred.UserPassword) != "s3cret" {
+	if string(cred.UserName) != testUserName || string(cred.UserPassword) != testPassword {
 		t.Fatalf("got name=%q pass=%q", cred.UserName, cred.UserPassword)
 	}
 }
@@ -72,7 +78,7 @@ func papPad(pw string) []byte {
 // verification against any compliant TTLS/PAP client fails.
 func TestParsePapAVPsStripsPasswordPadding(t *testing.T) {
 	const pw = "Twif@Test1234" // 13 bytes -> 3 NUL pad
-	buf := append(encodeAVP(avpCodeUserName, true, []byte("alice")),
+	buf := append(encodeAVP(avpCodeUserName, true, []byte(testUserName)),
 		encodeAVP(avpCodeUserPassword, true, papPad(pw))...)
 	cred, err := ParsePapAVPs(buf)
 	if err != nil {
@@ -84,7 +90,7 @@ func TestParsePapAVPsStripsPasswordPadding(t *testing.T) {
 }
 
 func TestParsePapAVPsMissingPassword(t *testing.T) {
-	buf := encodeAVP(avpCodeUserName, true, []byte("alice"))
+	buf := encodeAVP(avpCodeUserName, true, []byte(testUserName))
 	if _, err := ParsePapAVPs(buf); err == nil {
 		t.Fatal("expected error when User-Password AVP absent")
 	}
@@ -93,7 +99,7 @@ func TestParsePapAVPsMissingPassword(t *testing.T) {
 // TestParsePapAVPsMissingUserName is the mirror of
 // TestParsePapAVPsMissingPassword: User-Password present, User-Name absent.
 func TestParsePapAVPsMissingUserName(t *testing.T) {
-	buf := encodeAVP(avpCodeUserPassword, true, []byte("s3cret"))
+	buf := encodeAVP(avpCodeUserPassword, true, []byte(testPassword))
 	if _, err := ParsePapAVPs(buf); err == nil {
 		t.Fatal("expected error when User-Name AVP absent")
 	}
@@ -105,13 +111,13 @@ func TestParsePapAVPsMissingUserName(t *testing.T) {
 // code, its Vendor-Id-prefixed data must never end up in cred.UserName.
 func TestParsePapAVPsSkipsVendorAVP(t *testing.T) {
 	buf := append(encodeVendorAVP(avpCodeUserName, 10415, []byte("trap")),
-		append(encodeAVP(avpCodeUserName, true, []byte("alice")),
-			encodeAVP(avpCodeUserPassword, true, []byte("s3cret"))...)...)
+		append(encodeAVP(avpCodeUserName, true, []byte(testUserName)),
+			encodeAVP(avpCodeUserPassword, true, []byte(testPassword))...)...)
 	cred, err := ParsePapAVPs(buf)
 	if err != nil {
 		t.Fatalf("ParsePapAVPs error = %v", err)
 	}
-	if string(cred.UserName) != "alice" || string(cred.UserPassword) != "s3cret" {
+	if string(cred.UserName) != testUserName || string(cred.UserPassword) != testPassword {
 		t.Fatalf("got name=%q pass=%q, vendor AVP was misparsed", cred.UserName, cred.UserPassword)
 	}
 }
@@ -166,9 +172,9 @@ func encodeAVP(code uint32, mandatory bool, data []byte) []byte {
 		out[4] = avpFlagMandatory
 	}
 	// 3-byte big-endian length in out[5:8].
-	out[5] = byte(length >> 16)
-	out[6] = byte(length >> 8)
-	out[7] = byte(length)
+	out[5] = byte(length >> 16 & 0xff)
+	out[6] = byte(length >> 8 & 0xff)
+	out[7] = byte(length & 0xff)
 	out = append(out, data...)
 	for len(out)%4 != 0 {
 		out = append(out, 0x00)

@@ -23,8 +23,8 @@ func TestTerminatorFullPapFlow(t *testing.T) {
 		t.Fatal("first packet must have Start flag")
 	}
 
-	cred, keys := runTtlsPeer(t, term, start, "alice", "s3cret", 5*time.Second)
-	if string(cred.UserName) != "alice" || string(cred.UserPassword) != "s3cret" {
+	cred, keys := runTtlsPeer(t, term, start, testUserName, testPassword, 5*time.Second)
+	if string(cred.UserName) != testUserName || string(cred.UserPassword) != testPassword {
 		t.Fatalf("got name=%q pass=%q", cred.UserName, cred.UserPassword)
 	}
 	if len(keys.MSK) != 64 {
@@ -48,8 +48,8 @@ func TestTerminatorFullPapFlowSmallMTU(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 
-	cred, keys := runTtlsPeer(t, term, start, "alice", "s3cret", 5*time.Second)
-	if string(cred.UserName) != "alice" || string(cred.UserPassword) != "s3cret" {
+	cred, keys := runTtlsPeer(t, term, start, testUserName, testPassword, 5*time.Second)
+	if string(cred.UserName) != testUserName || string(cred.UserPassword) != testPassword {
 		t.Fatalf("got name=%q pass=%q", cred.UserName, cred.UserPassword)
 	}
 	if len(keys.MSK) != 64 {
@@ -119,7 +119,9 @@ func TestTerminatorCloseAbandonedMidHandshakeDoesNotHang(t *testing.T) {
 // handshake, then writes PAP inner AVPs (User-Name + User-Password) into the
 // tunnel, looping term.Process until it reports Done. It returns the
 // extracted credential and keys, failing the test on any error or timeout.
-func runTtlsPeer(t *testing.T, term *Terminator, start *TerminatorStep, username, password string, timeout time.Duration) (*PapCredential, *TtlsKeys) {
+func runTtlsPeer(
+	t *testing.T, term *Terminator, start *TerminatorStep, username, password string, timeout time.Duration,
+) (*PapCredential, *TtlsKeys) {
 	t.Helper()
 	return runTtlsPeerObserved(t, term, start, username, password, timeout, nil)
 }
@@ -204,7 +206,9 @@ func runTtlsPeerObserved(
 			inTypeData = nextClientFragment(t, &pendingToServer, peerMTU)
 
 		default:
-			raw := waitForClientBytes(t, feed, hsDone, writeDone, &handshakeChecked, &writeStarted, client, username, password, deadline)
+			raw := waitForClientBytes(
+				t, feed, hsDone, writeDone, &handshakeChecked, &writeStarted, client, username, password, deadline,
+			)
 			pendingToServer = raw
 			inTypeData = nextClientFragment(t, &pendingToServer, peerMTU)
 		}
@@ -245,7 +249,10 @@ func nextClientFragment(t *testing.T, pending *[]byte, mtu int) []byte {
 // calls term.Process itself: doing so before the corresponding TLS record
 // has been fully delivered is exactly the sequencing hazard Task 3 flagged
 // for the inner read (calling it before the record is delivered stalls).
-func waitForClientBytes(t *testing.T, feed *feedConn, hsDone, writeDone chan error, handshakeChecked, writeStarted *bool, client *tls.Conn, username, password string, deadline time.Time) []byte {
+func waitForClientBytes(
+	t *testing.T, feed *feedConn, hsDone, writeDone chan error, handshakeChecked, writeStarted *bool,
+	client *tls.Conn, username, password string, deadline time.Time,
+) []byte {
 	t.Helper()
 	for {
 		if raw := feed.readFromClient(); len(raw) > 0 {
@@ -308,7 +315,7 @@ func driveToAwaitingInner(t *testing.T) *Terminator {
 				}
 			}
 		}()
-		runTtlsPeerObserved(t, term, start, "alice", "s3cret", 5*time.Second, func(s *TerminatorStep) {
+		runTtlsPeerObserved(t, term, start, testUserName, testPassword, 5*time.Second, func(s *TerminatorStep) {
 			if s.AwaitingInner {
 				reached = true
 				panic(stopAtAwaiting{})

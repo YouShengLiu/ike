@@ -17,13 +17,13 @@ import (
 func TestTerminatorAcceptsInnerDataSentWithFinished(t *testing.T) {
 	peer := newMergedFlightPeer(t, tls.VersionTLS13)
 
-	step := peer.handshakeThenMergedFlight("alice", "s3cret")
+	step := peer.handshakeThenMergedFlight(testUserName, testPassword)
 
 	if !step.Done || !step.Success {
 		t.Fatalf("merged Finished+AVP packet must authenticate in one step, got Done=%v Success=%v (out %d bytes)",
 			step.Done, step.Success, len(step.OutTypeData))
 	}
-	if string(step.Cred.UserName) != "alice" || string(step.Cred.UserPassword) != "s3cret" {
+	if string(step.Cred.UserName) != testUserName || string(step.Cred.UserPassword) != testPassword {
 		t.Fatalf("got name=%q pass=%q", step.Cred.UserName, step.Cred.UserPassword)
 	}
 	if step.Keys == nil || len(step.Keys.MSK) != 64 {
@@ -56,8 +56,8 @@ func TestTerminatorAcceptsInnerDataInItsOwnPacket(t *testing.T) {
 				t.Fatalf("start: %v", err)
 			}
 
-			cred, keys := runTtlsPeer(t, term, start, "alice", "s3cret", 5*time.Second)
-			if string(cred.UserName) != "alice" || string(cred.UserPassword) != "s3cret" {
+			cred, keys := runTtlsPeer(t, term, start, testUserName, testPassword, 5*time.Second)
+			if string(cred.UserName) != testUserName || string(cred.UserPassword) != testPassword {
 				t.Fatalf("got name=%q pass=%q", cred.UserName, cred.UserPassword)
 			}
 			if len(keys.MSK) != 64 {
@@ -99,9 +99,9 @@ func TestTerminatorReportsAwaitingInner(t *testing.T) {
 			}
 		}
 	}
-	cred, _ := runTtlsPeerObserved(t, term, start, "alice", "s3cret", 5*time.Second, observe)
+	cred, _ := runTtlsPeerObserved(t, term, start, testUserName, testPassword, 5*time.Second, observe)
 
-	if string(cred.UserName) != "alice" {
+	if string(cred.UserName) != testUserName {
 		t.Fatalf("got name=%q", cred.UserName)
 	}
 	if !awaited {

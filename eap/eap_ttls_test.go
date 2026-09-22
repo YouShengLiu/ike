@@ -38,7 +38,7 @@ func TestEapTtlsMarshalUnmarshal(t *testing.T) {
 				t.Fatalf("Marshal() = %x, want %x", got, tt.want)
 			}
 			var rt EapTtls
-			if err := rt.Unmarshal(got); err != nil {
+			if err = rt.Unmarshal(got); err != nil {
 				t.Fatalf("Unmarshal() error = %v", err)
 			}
 			if rt.Flags != tt.in.Flags || rt.MessageLength != tt.in.MessageLength || !bytes.Equal(rt.TLSData, tt.in.TLSData) {

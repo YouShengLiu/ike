@@ -1,6 +1,7 @@
 package eap
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"testing"
@@ -27,7 +28,9 @@ func clientExportForTest(cs tls.ConnectionState) ([]byte, error) {
 // establishBridgeSession drives a real tls.Client against the bridge to
 // completion using the given client TLS config, and returns the bridge and
 // the client's final ConnectionState (for the symmetry cross-check).
-func establishBridgeSession(t *testing.T, serverCfg *tls.Config, clientCfg *tls.Config) (*tlsBridge, tls.ConnectionState) {
+func establishBridgeSession(
+	t *testing.T, serverCfg *tls.Config, clientCfg *tls.Config,
+) (*tlsBridge, tls.ConnectionState) {
 	t.Helper()
 	bridge := newTLSBridge(serverCfg)
 	t.Cleanup(func() {
@@ -102,7 +105,7 @@ func TestDeriveTtlsKeysLengthsAndPMK(t *testing.T) {
 			if err != nil {
 				t.Fatalf("client export: %v", err)
 			}
-			if string(clientKM[:64]) != string(keys.MSK) {
+			if !bytes.Equal(clientKM[:64], keys.MSK) {
 				t.Fatal("server MSK != client-derived MSK (label/context mismatch)")
 			}
 		})

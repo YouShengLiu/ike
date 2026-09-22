@@ -3,6 +3,7 @@ package eap
 import (
 	"crypto/tls"
 	"io"
+	"math"
 	"time"
 
 	"github.com/pkg/errors"
@@ -153,19 +154,22 @@ type TerminatorStep struct {
 // with inTypeData == nil to obtain the initial TTLS-Start packet, then once
 // per subsequent EAP-Response received from the peer, feeding that
 // response's EAP-TTLS type-data (starting at the Type byte) as inTypeData.
-func (t *Terminator) Process(inTypeData []byte) (result *TerminatorStep, err error) {
-	// Any error return from here on means this authentication attempt is
-	// broken and the caller will abandon this Terminator -- close the
-	// bridge so its background handshake goroutine doesn't stay parked in
-	// engineConn.Read forever. Close is idempotent/nil-safe, so this is
-	// harmless to run even on paths that already closed the bridge
-	// themselves (e.g. the Done/Success path below).
-	defer func() {
-		if err != nil {
-			_ = t.Close()
+func (t *Terminator) Process(inTypeData []byte) (*TerminatorStep, error) {
+	step, err := t.process(inTypeData)
+	if err != nil {
+		// Any error means this authentication attempt is broken and the
+		// caller will abandon this Terminator -- close the bridge so its
+		// background handshake goroutine doesn't stay parked in
+		// engineConn.Read forever. Close is idempotent/nil-safe, so this is
+		// harmless on paths that already closed the bridge themselves.
+		if cerr := t.Close(); cerr != nil {
+			err = errors.Wrapf(err, "Terminator: close after failure: %v", cerr)
 		}
-	}()
+	}
+	return step, err
+}
 
+func (t *Terminator) process(inTypeData []byte) (*TerminatorStep, error) {
 	switch t.state {
 	case ttlsStateStart:
 		t.bridge = newTLSBridge(t.cfg)
@@ -272,8 +276,8 @@ func (t *Terminator) Process(inTypeData []byte) (result *TerminatorStep, err err
 			return nil, err
 		}
 		if t.bridge.handshakeDone() {
-			if err := t.bridge.handshakeErr(); err != nil {
-				return nil, errors.Wrap(err, "Terminator: handshake failed")
+			if hsErr := t.bridge.handshakeErr(); hsErr != nil {
+				return nil, errors.Wrap(hsErr, "Terminator: handshake failed")
 			}
 			t.state = ttlsStateInner
 
@@ -283,7 +287,8 @@ func (t *Terminator) Process(inTypeData []byte) (result *TerminatorStep, err err
 			// and its inner AVPs in one EAP packet (Windows 11 does), and
 			// answering such a packet with another request instead of the
 			// authentication result leaves the peer waiting forever.
-			inner, err := t.bridge.takeAppData(innerProbeTimeout)
+			var inner []byte
+			inner, err = t.bridge.takeAppData(innerProbeTimeout)
 			if err != nil && err != io.EOF {
 				return nil, errors.Wrap(err, "Terminator: probe inner")
 			}
@@ -315,7 +320,9 @@ func (t *Terminator) finishInner(app []byte) (*TerminatorStep, error) {
 	// terminator closed so the caller's own Close (callers are told to always
 	// call it) stays a no-op instead of hitting an already-closed connection
 	// and reporting "use of closed network connection" on every success.
-	_ = t.Close()
+	if err = t.Close(); err != nil {
+		return nil, errors.Wrap(err, "Terminator: close")
+	}
 	return &TerminatorStep{Done: true, Success: true, Cred: cred, Keys: keys}, nil
 }
 
@@ -331,8 +338,12 @@ func (t *Terminator) emitOutbound() (*TerminatorStep, error) {
 		if err != nil {
 			return nil, err
 		}
+		total := len(msg)
+		if total > math.MaxUint32 {
+			return nil, errors.Errorf("Terminator: outbound message too large (%d bytes)", total)
+		}
 		t.outPending = msg
-		t.outTotal = uint32(len(msg))
+		t.outTotal = uint32(total)
 		t.outFirst = true
 	}
 
