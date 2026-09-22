@@ -155,3 +155,23 @@ func TestParsePapAVPsRejectsShortVendorAVP(t *testing.T) {
 		t.Fatal("expected error when vendor AVP length can't hold its Vendor-Id")
 	}
 }
+
+// encodeAVP builds one non-vendor Diameter AVP, padded to a 4-byte boundary.
+// AVP Length counts the header + data but NOT the trailing padding.
+func encodeAVP(code uint32, mandatory bool, data []byte) []byte {
+	length := avpHeaderLen + len(data)
+	out := make([]byte, avpHeaderLen)
+	binary.BigEndian.PutUint32(out[0:4], code)
+	if mandatory {
+		out[4] = avpFlagMandatory
+	}
+	// 3-byte big-endian length in out[5:8].
+	out[5] = byte(length >> 16)
+	out[6] = byte(length >> 8)
+	out[7] = byte(length)
+	out = append(out, data...)
+	for len(out)%4 != 0 {
+		out = append(out, 0x00)
+	}
+	return out
+}
