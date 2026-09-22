@@ -12,8 +12,8 @@ type TtlsKeys struct {
 	EMSK []byte // 64 bytes
 }
 
-// PMK returns the IEEE 802.11i Pairwise Master Key = MSK[0:32].
-func (k *TtlsKeys) PMK() []byte { return k.MSK[:32] }
+// PMK returns a copy of the IEEE 802.11i Pairwise Master Key = MSK[0:32].
+func (k *TtlsKeys) PMK() []byte { return append([]byte(nil), k.MSK[:32]...) }
 
 // DeriveTtlsKeys derives 128 bytes of keying material per RFC 5281 §8,
 // using the RFC 5705 exporter with version-dependent label/context, and

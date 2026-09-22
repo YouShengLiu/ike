@@ -108,3 +108,11 @@ func TestDeriveTtlsKeysLengthsAndPMK(t *testing.T) {
 		})
 	}
 }
+
+func TestPMKIsACopy(t *testing.T) {
+	k := &TtlsKeys{MSK: make([]byte, 64)}
+	k.PMK()[0] = 0xff
+	if k.MSK[0] != 0 {
+		t.Fatal("mutating PMK() result changed MSK")
+	}
+}
