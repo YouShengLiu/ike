@@ -322,14 +322,14 @@ func TestTLSBridgeApplicationDataRoundTrip(t *testing.T) {
 				}
 			}
 			// Only attempt to read decrypted app data right after feeding a
-			// complete inbound chunk: readAppData blocks until the engine has
+			// complete inbound chunk: takeAppData waits until the engine has
 			// something to decrypt, so calling it with nothing in flight
 			// would hang this goroutine forever.
 			if in := serverFeed.readFromClient(); len(in) > 0 {
 				if err := bridge.writeInbound(in); err != nil {
 					return
 				}
-				data, err := bridge.readAppData()
+				data, err := bridge.takeAppData(5 * time.Second)
 				if len(data) > 0 {
 					got = append(got, data...)
 				}
@@ -350,19 +350,19 @@ func TestTLSBridgeApplicationDataRoundTrip(t *testing.T) {
 	<-readDone
 
 	if string(got) != "hello inner AVP" {
-		t.Fatalf("readAppData = %q, want %q", got, "hello inner AVP")
+		t.Fatalf("takeAppData = %q, want %q", got, "hello inner AVP")
 	}
 }
 
-// TestTLSBridgeCloseUnblocksReadAppData proves the specific concurrency
+// TestTLSBridgeCloseUnblocksTakeAppData proves the specific concurrency
 // property this bridge exists to guarantee: a goroutine parked in
-// readAppData() (waiting on the internal condition variable because no
+// takeAppData() (waiting on the internal condition variable because no
 // inbound TLS bytes have been delivered yet) must be woken up by close(),
 // not left hanging forever. If engineConn.Close's cond.Broadcast were ever
 // dropped or misrouted, this test would hang until the -timeout kills the
 // whole test binary rather than failing cleanly -- so it uses its own
 // bounded select/timeout to fail promptly and informatively instead.
-func TestTLSBridgeCloseUnblocksReadAppData(t *testing.T) {
+func TestTLSBridgeCloseUnblocksTakeAppData(t *testing.T) {
 	serverCfg := testTLSServerConfig(t)
 	bridge := newTLSBridge(serverCfg)
 
@@ -370,7 +370,7 @@ func TestTLSBridgeCloseUnblocksReadAppData(t *testing.T) {
 	// waiting on the condition variable.
 	readResult := make(chan error, 1)
 	go func() {
-		_, err := bridge.readAppData()
+		_, err := bridge.takeAppData(10 * time.Second)
 		readResult <- err
 	}()
 
@@ -386,9 +386,9 @@ func TestTLSBridgeCloseUnblocksReadAppData(t *testing.T) {
 	select {
 	case err := <-readResult:
 		if err == nil {
-			t.Fatal("readAppData returned nil error after close, want a non-nil error (e.g. io.EOF)")
+			t.Fatal("takeAppData returned nil error after close, want a non-nil error (e.g. io.EOF)")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("readAppData did not unblock within 2s after close(); cond.Broadcast likely missing/misrouted")
+		t.Fatal("takeAppData did not unblock within 2s after close(); cond.Broadcast likely missing/misrouted")
 	}
 }

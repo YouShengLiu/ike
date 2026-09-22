@@ -17,13 +17,20 @@ import (
 // silent hang.
 const bridgeOutputTimeout = 3 * time.Second
 
-// innerProbeTimeout bounds the post-handshake check for inner data that RFC
-// 9427 Section 3 mandates. It is a grace period for the TLS engine to
-// surface records that arrived with the peer's Finished, not a wait for the
-// peer: a peer that sends its inner data in a separate packet (TLS 1.2
-// always, TLS 1.3 peers such as wpa_supplicant) simply costs this much once
-// per authentication.
+// innerProbeTimeout bounds each check for decrypted inner data. Right after
+// the handshake it is the grace period RFC 9427 Section 3 requires for the
+// TLS engine to surface records that arrived with the peer's Finished (a
+// TLS 1.2 peer, or a TLS 1.3 peer such as wpa_supplicant that sends its
+// inner data separately, simply costs this much once per authentication).
+// In the inner state it bounds the wait for the peer's reply to decrypt
+// to application data, so a bare ack or a post-handshake TLS message
+// results in a re-prompt instead of a blocked caller.
 const innerProbeTimeout = 250 * time.Millisecond
+
+// maxInnerRounds bounds how many times the terminator re-prompts a peer that
+// answers the post-handshake prompt without inner data (e.g. with a bare
+// ack) before giving up. A conforming peer needs zero such rounds.
+const maxInnerRounds = 3
 
 // ttlsState tracks where a single EAP-TTLS authentication is in its
 // lifecycle: before anything has been sent, mid-handshake, waiting for the
@@ -79,6 +86,10 @@ type Terminator struct {
 	// outFirst is true exactly when the next fragment emitOutbound sends is
 	// the first fragment of outTotal's message.
 	outFirst bool
+
+	// innerRounds counts post-handshake rounds in which the peer sent no
+	// inner data, so the re-prompt in Process is bounded by maxInnerRounds.
+	innerRounds int
 
 	// closed guards Close so it is idempotent: bridge.close() itself is not
 	// documented as safe to call twice, and repeated calls happen naturally
@@ -190,17 +201,11 @@ func (t *Terminator) Process(inTypeData []byte) (result *TerminatorStep, err err
 
 		// wasInner: whether we had already finished the handshake as of the
 		// START of this round (i.e. in a previous Process call). If so, the
-		// message we just reassembled is necessarily encrypted inner
-		// (tunneled PAP) application data, not more handshake bytes -- and
-		// it is therefore safe to call the blocking readAppData() below,
-		// since we know the corresponding TLS record(s) were just fed via
-		// writeInbound in this very call. If the handshake only *just*
-		// finished (this round), the message we fed was the peer's final
-		// handshake flight, not inner data yet; reading app data now would
-		// block forever since the peer's inner AVP write hasn't happened
-		// yet on the wire (it can only arrive in a later Process call), and
-		// there's no way to unblock a synchronous call by waiting for more
-		// input we can't fetch until this call returns.
+		// message we just reassembled is expected to be encrypted inner
+		// (tunneled PAP) application data, and we read it back below. If
+		// the handshake only *just* finished (this round), the message we
+		// fed was the peer's final handshake flight; any inner data can at
+		// most have ridden along with it (the RFC 9427 probe further down).
 		wasInner := t.state == ttlsStateInner
 
 		if len(msg) > 0 {
@@ -210,14 +215,29 @@ func (t *Terminator) Process(inTypeData []byte) (result *TerminatorStep, err err
 		}
 
 		if wasInner {
-			app, err := t.bridge.readAppData()
+			// Bounded, not blocking: the peer may legitimately answer the
+			// post-handshake prompt with a bare ack (empty msg, nothing fed
+			// above) or with a TLS record that decrypts to no application
+			// data (a TLS 1.3 post-handshake message). A blocking read
+			// would park this goroutine forever in either case, so treat
+			// "no data" as "prompt again", up to maxInnerRounds.
+			app, err := t.bridge.takeAppData(innerProbeTimeout)
 			if err != nil && err != io.EOF {
 				return nil, errors.Wrap(err, "Terminator: read inner")
 			}
-			if len(app) == 0 {
-				return nil, errors.Errorf("Terminator: expected inner data, got none")
+			if len(app) > 0 {
+				return t.finishInner(app)
 			}
-			return t.finishInner(app)
+			t.innerRounds++
+			if t.innerRounds > maxInnerRounds {
+				return nil, errors.Errorf("Terminator: no inner data after %d prompts", maxInnerRounds)
+			}
+			step, err := t.emitOutbound()
+			if err != nil {
+				return nil, err
+			}
+			step.AwaitingInner = true
+			return step, nil
 		}
 
 		// Flush whatever the bridge has queued as output this round (the
@@ -237,7 +257,7 @@ func (t *Terminator) Process(inTypeData []byte) (result *TerminatorStep, err err
 		// so the check can read false even though the handshake is about
 		// to complete, leaving t.state stuck at ttlsStateHandshake forever
 		// and causing the next round's inner AVP data to be misrouted
-		// through the handshake path instead of readAppData.
+		// through the handshake path instead of takeAppData.
 		step, err := t.emitOutbound()
 		if err != nil {
 			return nil, err

@@ -16,7 +16,7 @@ import (
 // Design note: an earlier draft wired tls.Server directly to one end of a
 // net.Pipe, with writeInbound/readOutbound talking to the other end. That
 // deadlocks under the lock-step calling pattern EAP-TTLS requires: a caller
-// does writeInbound(record) followed immediately by readAppData() on the
+// does writeInbound(record) followed immediately by takeAppData() on the
 // same goroutine, but net.Pipe's Write blocks until a matching Read occurs,
 // and nothing performs that Read until writeInbound has already returned.
 // Instead, tls.Server is wired to an internal engineConn backed by two
@@ -103,24 +103,12 @@ func (b *tlsBridge) connState() tls.ConnectionState {
 	return b.conn.ConnectionState()
 }
 
-// readAppData reads one chunk of decrypted application data (inner AVPs).
-// It blocks until the engine has decrypted data available, an error occurs,
-// or the bridge is closed. Callers must have already delivered the
-// corresponding TLS record(s) via writeInbound before calling this.
-func (b *tlsBridge) readAppData() ([]byte, error) {
-	r, ok := <-b.appDataPump()
-	if !ok {
-		return nil, io.EOF
-	}
-	return r.data, r.err
-}
-
 // takeAppData returns decrypted application data that is already available,
-// waiting at most d for the engine to surface it. Unlike readAppData it
-// never blocks indefinitely: no data within d is reported as no data, not
-// as an error. RFC 9427 Section 3 requires this check once the TLS session
-// is established, because a TLS 1.3 peer may send its Finished and its
-// first inner records together.
+// waiting at most d for the engine to surface it. It never blocks
+// indefinitely: no data within d is reported as no data, not as an error.
+// RFC 9427 Section 3 requires this check once the TLS session is
+// established, because a TLS 1.3 peer may send its Finished and its first
+// inner records together.
 func (b *tlsBridge) takeAppData(d time.Duration) ([]byte, error) {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -178,7 +166,7 @@ func (b *tlsBridge) appDataPump() <-chan appDataChunk {
 // and only mark the bridge closed once engineConn.Close runs; marking it
 // closed up front would make the close_notify write fail immediately.
 // engineConn.Close's cond.Broadcast is what unblocks any goroutine parked
-// in engineConn.Read (e.g. a caller blocked in readAppData), so it returns
+// in engineConn.Read (e.g. the pump goroutine behind takeAppData), so it returns
 // promptly with io.EOF instead of hanging forever.
 //
 // Note: close() returning does not imply the handshake goroutine started in

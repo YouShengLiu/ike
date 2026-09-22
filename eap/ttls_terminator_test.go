@@ -1,6 +1,7 @@
 package eap
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"testing"
@@ -243,7 +244,7 @@ func nextClientFragment(t *testing.T, pending *[]byte, mtu int) []byte {
 // the AVP write once the handshake has completed. It deliberately never
 // calls term.Process itself: doing so before the corresponding TLS record
 // has been fully delivered is exactly the sequencing hazard Task 3 flagged
-// for readAppData (it blocks, so calling it too early deadlocks).
+// for the inner read (calling it before the record is delivered stalls).
 func waitForClientBytes(t *testing.T, feed *feedConn, hsDone, writeDone chan error, handshakeChecked, writeStarted *bool, client *tls.Conn, username, password string, deadline time.Time) []byte {
 	t.Helper()
 	for {
@@ -281,5 +282,110 @@ func waitForClientBytes(t *testing.T, feed *feedConn, hsDone, writeDone chan err
 			t.Fatalf("waitForClientBytes: timed out waiting for client output")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// driveToAwaitingInner runs a real TLS 1.2 peer through the handshake and
+// stops the moment the terminator reports AwaitingInner, leaving it parked
+// in the inner state with no inner data delivered.
+func driveToAwaitingInner(t *testing.T) *Terminator {
+	t.Helper()
+	srvCfg := testTLSServerConfig(t)
+	srvCfg.MinVersion = tls.VersionTLS12
+	srvCfg.MaxVersion = tls.VersionTLS12
+	term := NewTerminator(srvCfg, 0)
+	start, err := term.Process(nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	type stopAtAwaiting struct{}
+	reached := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if _, ok := r.(stopAtAwaiting); !ok {
+					panic(r)
+				}
+			}
+		}()
+		runTtlsPeerObserved(t, term, start, "alice", "s3cret", 5*time.Second, func(s *TerminatorStep) {
+			if s.AwaitingInner {
+				reached = true
+				panic(stopAtAwaiting{})
+			}
+		})
+	}()
+	if !reached {
+		t.Fatal("never reached AwaitingInner")
+	}
+	return term
+}
+
+// processWithin calls Process and fails the test if it does not return
+// within d -- the regression shape for a Process that blocks forever.
+func processWithin(t *testing.T, term *Terminator, in []byte, d time.Duration) (*TerminatorStep, error) {
+	t.Helper()
+	type res struct {
+		step *TerminatorStep
+		err  error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		s, e := term.Process(in)
+		ch <- res{s, e}
+	}()
+	select {
+	case r := <-ch:
+		return r.step, r.err
+	case <-time.After(d):
+		t.Fatalf("Process blocked >%v", d)
+		return nil, nil
+	}
+}
+
+// TestTerminatorEmptyPacketInInnerStateRePrompts: a peer that answers the
+// post-handshake prompt with a bare ack (no TLS data) must get another
+// prompt, not hang the caller forever waiting for inner data.
+func TestTerminatorEmptyPacketInInnerStateRePrompts(t *testing.T) {
+	term := driveToAwaitingInner(t)
+	t.Cleanup(func() {
+		if err := term.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	step, err := processWithin(t, term, []byte{byte(EapTypeTtls), 0x00}, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if !step.AwaitingInner || step.Done {
+		t.Fatalf("want AwaitingInner re-prompt, got %+v", step)
+	}
+	if !bytes.Equal(step.OutTypeData, []byte{byte(EapTypeTtls), 0x00}) {
+		t.Fatalf("re-prompt = %x, want empty TTLS packet", step.OutTypeData)
+	}
+}
+
+// TestTerminatorEmptyPacketsInInnerStateEventuallyFail: the re-prompt is
+// bounded so a peer that never sends inner data cannot ping-pong forever.
+func TestTerminatorEmptyPacketsInInnerStateEventuallyFail(t *testing.T) {
+	term := driveToAwaitingInner(t)
+	t.Cleanup(func() {
+		if err := term.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	empty := []byte{byte(EapTypeTtls), 0x00}
+	for i := 0; i < maxInnerRounds; i++ {
+		if _, err := processWithin(t, term, empty, 2*time.Second); err != nil {
+			t.Fatalf("round %d: unexpected error %v", i, err)
+		}
+	}
+	if _, err := processWithin(t, term, empty, 2*time.Second); err == nil {
+		t.Fatal("expected error after exceeding maxInnerRounds, got nil")
+	}
+	if !term.closed {
+		t.Fatal("terminator not closed after round-cap error")
 	}
 }
