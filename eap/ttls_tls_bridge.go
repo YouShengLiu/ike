@@ -35,13 +35,26 @@ type tlsBridge struct {
 	hsErr    error
 	closed   bool
 	appCh    chan appDataChunk // decrypted inner data, fed by appDataPump's goroutine
+
+	// done is closed by engineConn.Close. It is the second wake-up path the
+	// pump goroutine needs: cond.Broadcast only reaches a goroutine parked in
+	// engineConn.Read, and the pump can instead be parked on a send into a
+	// full appCh that nobody will ever drain again.
+	done chan struct{}
+	// pumpDone is closed when the pump goroutine returns, so teardown is
+	// observable: nothing in the package waits on it, but a leak here is
+	// otherwise invisible until the process runs out of memory.
+	pumpDone chan struct{}
 }
 
 // newTLSBridge starts a server-side TLS handshake in the background. The
 // handshake progresses as the caller shuttles bytes via writeInbound and
 // readOutbound.
 func newTLSBridge(cfg *tls.Config) *tlsBridge {
-	b := &tlsBridge{}
+	b := &tlsBridge{
+		done:     make(chan struct{}),
+		pumpDone: make(chan struct{}),
+	}
 	b.cond = sync.NewCond(&b.mu)
 	b.conn = tls.Server(engineConn{b}, cfg)
 
@@ -142,15 +155,18 @@ func (b *tlsBridge) appDataPump() <-chan appDataChunk {
 		b.appCh = ch
 		go func() {
 			defer close(ch)
+			defer close(b.pumpDone)
 			for {
 				buf := make([]byte, 16384)
 				n, err := b.conn.Read(buf)
 				if n > 0 {
-					ch <- appDataChunk{data: buf[:n]}
+					if !b.send(ch, appDataChunk{data: buf[:n]}) {
+						return
+					}
 				}
 				if err != nil {
 					if err != io.EOF {
-						ch <- appDataChunk{err: err}
+						b.send(ch, appDataChunk{err: err})
 					}
 					return
 				}
@@ -158,6 +174,19 @@ func (b *tlsBridge) appDataPump() <-chan appDataChunk {
 		}()
 	}
 	return b.appCh
+}
+
+// send hands one chunk to the reader of ch, or gives up if the bridge is
+// closed. A peer decides how many records arrive in one flight, so ch can
+// fill up while the only reader has already moved on; without the second
+// case the pump would park here for the lifetime of the process.
+func (b *tlsBridge) send(ch chan<- appDataChunk, c appDataChunk) bool {
+	select {
+	case ch <- c:
+		return true
+	case <-b.done:
+		return false
+	}
 }
 
 // close tears down the TLS engine and unblocks any in-progress reads.
@@ -213,7 +242,10 @@ func (c engineConn) Write(p []byte) (int, error) {
 func (c engineConn) Close() error {
 	b := c.b
 	b.mu.Lock()
-	b.closed = true
+	if !b.closed {
+		b.closed = true
+		close(b.done)
+	}
 	b.cond.Broadcast()
 	b.mu.Unlock()
 	return nil

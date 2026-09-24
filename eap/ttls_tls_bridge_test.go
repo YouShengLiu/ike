@@ -392,3 +392,69 @@ func TestTLSBridgeCloseUnblocksTakeAppData(t *testing.T) {
 		t.Fatal("takeAppData did not unblock within 2s after close(); cond.Broadcast likely missing/misrouted")
 	}
 }
+
+// TestTLSBridgePumpExitsWhenNobodyDrains covers the leak an unauthenticated
+// peer can trigger: it packs more application-data records into one flight
+// than the pump's channel can buffer, and the terminator stops reading after
+// the first chunk (the credentials are in it, or it failed). close() then
+// unblocks engineConn.Read, but a pump parked on a channel send is not
+// waiting on Read -- without a second wake-up path it never exits, pinning
+// the tls.Conn and its buffers for the lifetime of the process.
+func TestTLSBridgePumpExitsWhenNobodyDrains(t *testing.T) {
+	serverCfg := testTLSServerConfig(t)
+	bridge := newTLSBridge(serverCfg)
+
+	clientConn, serverFeed := newMemConnPair()
+	clientCfg := testTLSClientConfig(t, serverCfg)
+	client := tls.Client(clientConn, clientCfg)
+
+	hsDone := make(chan error, 1)
+	go func() { hsDone <- client.HandshakeContext(context.Background()) }()
+	shuttle(t, bridge, serverFeed, hsDone)
+
+	// One record per write, more of them than the pump channel can hold.
+	writeDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < 8; i++ {
+			if _, err := client.Write([]byte("inner")); err != nil {
+				writeDone <- err
+				return
+			}
+		}
+		writeDone <- nil
+	}()
+	if err := <-writeDone; err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if in := serverFeed.readFromClient(); len(in) > 0 {
+			if err := bridge.writeInbound(in); err != nil {
+				t.Fatalf("writeInbound: %v", err)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("client records never reached the bridge")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// The terminator's behaviour: take the first chunk, then stop reading.
+	if _, err := bridge.takeAppData(2 * time.Second); err != nil {
+		t.Fatalf("takeAppData: %v", err)
+	}
+
+	if err := bridge.close(); err != nil {
+		t.Logf("bridge close: %v", err)
+	}
+
+	select {
+	case <-bridge.pumpDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("app data pump still running 2s after close(); it is parked on a channel send")
+	}
+}
