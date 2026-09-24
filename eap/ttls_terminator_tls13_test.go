@@ -19,9 +19,10 @@ func TestTerminatorAcceptsInnerDataSentWithFinished(t *testing.T) {
 
 	step := peer.handshakeThenMergedFlight(testUserName, testPassword)
 
-	if !step.Done || !step.Success {
-		t.Fatalf("merged Finished+AVP packet must authenticate in one step, got Done=%v Success=%v (out %d bytes)",
-			step.Done, step.Success, len(step.OutTypeData))
+	if !step.Done || !step.CredentialsExtracted {
+		t.Fatalf("merged Finished+AVP packet must yield credentials in one step,"+
+			" got Done=%v CredentialsExtracted=%v (out %d bytes)",
+			step.Done, step.CredentialsExtracted, len(step.OutTypeData))
 	}
 	if string(step.Cred.UserName) != testUserName || string(step.Cred.UserPassword) != testPassword {
 		t.Fatalf("got name=%q pass=%q", step.Cred.UserName, step.Cred.UserPassword)

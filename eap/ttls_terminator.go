@@ -120,7 +120,7 @@ func NewTerminator(cfg *tls.Config, mtu int) *Terminator {
 // Close releases the underlying TLS engine, if one has been started. It is
 // nil-safe (a Terminator on which Process has never been called has no
 // bridge yet) and idempotent (safe to call more than once, including after
-// Process has already closed the bridge itself on the Done/Success path or
+// Process has already closed the bridge itself on the Done path or
 // on an error path).
 //
 // Callers MUST call Close if an authentication is abandoned before
@@ -142,9 +142,16 @@ func (t *Terminator) Close() error {
 type TerminatorStep struct {
 	OutTypeData []byte // EAP-TTLS type-data to wrap in an EAP-Request (nil if none pending)
 	Done        bool
-	Success     bool
-	Cred        *PapCredential
-	Keys        *TtlsKeys
+
+	// CredentialsExtracted reports that the tunnel completed and Cred holds
+	// the inner PAP identity and password the peer presented. It says nothing
+	// about whether that password is correct: this package never sees the
+	// credential store. A caller that maps this to EAP-Success without
+	// verifying Cred first accepts every username and password offered.
+	CredentialsExtracted bool
+
+	Cred *PapCredential
+	Keys *TtlsKeys
 
 	// AwaitingInner marks the step where the TLS handshake has completed but
 	// the peer has not sent its inner AVPs, so OutTypeData is only a prompt
@@ -367,7 +374,7 @@ func (t *Terminator) finishInner(app []byte) (*TerminatorStep, error) {
 	if err = t.Close(); err != nil {
 		return nil, errors.Wrap(err, "Terminator: close")
 	}
-	return &TerminatorStep{Done: true, Success: true, Cred: cred, Keys: keys}, nil
+	return &TerminatorStep{Done: true, CredentialsExtracted: true, Cred: cred, Keys: keys}, nil
 }
 
 // emitOutbound takes pending TLS bytes produced by the bridge and returns

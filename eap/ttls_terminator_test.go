@@ -83,7 +83,7 @@ func TestTerminatorCloseAbandonedMidHandshakeDoesNotHang(t *testing.T) {
 
 	// Start the handshake (creates the bridge) but never feed it a
 	// ClientHello -- the peer "vanished". Before the fix, only the
-	// Done/Success path in Process called bridge.close(), so this
+	// Done path in Process called bridge.close(), so this
 	// Terminator's bridge goroutine would stay blocked forever.
 	if _, err := term.Process(nil); err != nil {
 		t.Fatalf("start: %v", err)
@@ -187,8 +187,8 @@ func runTtlsPeerWriters(
 	step := start
 	for {
 		if step.Done {
-			if !step.Success {
-				t.Fatalf("terminator reported failure")
+			if !step.CredentialsExtracted {
+				t.Fatalf("terminator finished without extracting credentials")
 			}
 			return step.Cred, step.Keys
 		}
