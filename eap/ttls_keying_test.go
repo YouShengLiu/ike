@@ -119,3 +119,57 @@ func TestPMKIsACopy(t *testing.T) {
 		t.Fatal("mutating PMK() result changed MSK")
 	}
 }
+
+// TestDeriveTtlsKeysLabelHasTeeth: the symmetry cross-check above derives the
+// client side with its own copy of the label and context, which only proves
+// the two sides agree. It would prove nothing if the exporter ignored those
+// inputs, so pin that down here: a different label, and for TLS 1.3 a
+// different context, must both change the keying material. Whether the label
+// itself is the one the specification names still has to be read off
+// RFC 5281 Section 8 and RFC 9427 Section 2.1 by a human.
+func TestDeriveTtlsKeysLabelHasTeeth(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		version uint16
+	}{
+		{"TLS1.2", tls.VersionTLS12},
+		{"TLS1.3", tls.VersionTLS13},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			serverCfg := testTLSServerConfig(t)
+			serverCfg.MinVersion = tt.version
+			serverCfg.MaxVersion = tt.version
+			clientCfg := testTLSClientConfig(t, serverCfg)
+			clientCfg.MinVersion = tt.version
+			clientCfg.MaxVersion = tt.version
+
+			bridge, _ := establishBridgeSession(t, serverCfg, clientCfg)
+			cs := bridge.connState()
+
+			keys, err := DeriveTtlsKeys(cs)
+			if err != nil {
+				t.Fatalf("DeriveTtlsKeys: %v", err)
+			}
+
+			otherLabel, err := cs.ExportKeyingMaterial("not the ttls label", nil, 128)
+			if err != nil {
+				t.Fatalf("export with another label: %v", err)
+			}
+			if bytes.Equal(otherLabel[:64], keys.MSK) {
+				t.Fatal("changing the exporter label left the MSK unchanged")
+			}
+
+			if tt.version != tls.VersionTLS13 {
+				return
+			}
+			otherContext, err := cs.ExportKeyingMaterial(
+				"EXPORTER_EAP_TLS_Key_Material", []byte{byte(EapTypeTtls) + 1}, 128)
+			if err != nil {
+				t.Fatalf("export with another context: %v", err)
+			}
+			if bytes.Equal(otherContext[:64], keys.MSK) {
+				t.Fatal("changing the exporter context left the MSK unchanged")
+			}
+		})
+	}
+}
