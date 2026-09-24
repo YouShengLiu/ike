@@ -198,6 +198,15 @@ func (t *Terminator) process(inTypeData []byte) (*TerminatorStep, error) {
 		// data of its own to reassemble. Continue the outbound send instead
 		// of trying to interpret this packet as a new inbound message.
 		if len(t.outPending) > 0 {
+			// Only the L/M/S bits are ours to judge: the low bits of the
+			// flags byte carry the EAP-TTLS version, which a peer may set on
+			// an otherwise bare ack.
+			if len(pkt.TLSData) > 0 ||
+				pkt.Flags&(EapTlsFlagLengthIncluded|EapTlsFlagMoreFragments|EapTlsFlagStart) != 0 {
+				return nil, errors.Errorf(
+					"Terminator: peer sent %d bytes with flags 0x%02x during an outbound fragment train,"+
+						" expected a bare ack", len(pkt.TLSData), pkt.Flags)
+			}
 			return t.emitOutbound()
 		}
 

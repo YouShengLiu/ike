@@ -527,3 +527,48 @@ func TestTerminatorReportsTunnelClosedByPeer(t *testing.T) {
 		t.Fatalf("error = %v, want it to name the closed tunnel", err)
 	}
 }
+
+// TestTerminatorRejectsPeerDataDuringFragmentTrain: while the terminator is
+// sending its own fragments the peer's only legal reply is a bare ack. Any
+// payload it sends there used to be dropped on the floor, so a TLS alert --
+// the peer rejecting the server certificate, say -- surfaced later as an
+// unexplained desync instead of the failure it is.
+func TestTerminatorRejectsPeerDataDuringFragmentTrain(t *testing.T) {
+	newMidTrain := func() *Terminator {
+		term := NewTerminator(testTLSServerConfig(t), 4)
+		term.state = ttlsStateHandshake
+		term.outPending = []byte("fragment tail")
+		return term
+	}
+
+	withData := &EapTtls{TLSData: []byte{0x15, 0x03, 0x03}} // start of a TLS alert
+	in, err := withData.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err = newMidTrain().Process(in); err == nil {
+		t.Fatal("peer payload during the fragment train was accepted")
+	}
+
+	withFlag := &EapTtls{Flags: EapTlsFlagMoreFragments}
+	if in, err = withFlag.Marshal(); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err = newMidTrain().Process(in); err == nil {
+		t.Fatal("peer fragment flag during the fragment train was accepted")
+	}
+
+	// A bare ack, including one that carries only the version bits an
+	// implementation may set, still advances the train.
+	ack := &EapTtls{Flags: 0x01}
+	if in, err = ack.Marshal(); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	step, err := newMidTrain().Process(in)
+	if err != nil {
+		t.Fatalf("bare ack rejected: %v", err)
+	}
+	if len(step.OutTypeData) == 0 {
+		t.Fatal("bare ack produced no next fragment")
+	}
+}
