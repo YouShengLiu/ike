@@ -19,6 +19,11 @@ const (
 	avpHeaderLen          = 8 // no vendor id
 )
 
+// errPapAVPsIncomplete reports that the stream parsed cleanly as far as it
+// goes but does not yet hold both PAP AVPs, so the caller should collect more
+// tunneled bytes rather than fail the authentication.
+var errPapAVPsIncomplete = errors.New("ParsePapAVPs: incomplete AVP stream")
+
 // PapCredential holds the cleartext PAP inner identity/password.
 type PapCredential struct {
 	UserName     []byte
@@ -27,6 +32,11 @@ type PapCredential struct {
 
 // ParsePapAVPs scans a decrypted inner AVP stream and extracts the PAP
 // User-Name and User-Password AVPs. Vendor-specific AVPs are skipped.
+//
+// A stream that is well-formed but stops short -- a trailing partial AVP, or
+// only one of the two PAP AVPs -- yields errPapAVPsIncomplete, because the
+// tunnel is a byte stream and the rest may still be on its way. Only a stream
+// that cannot be valid whatever follows is a hard error.
 func ParsePapAVPs(b []byte) (*PapCredential, error) {
 	cred := &PapCredential{}
 	pos := 0
@@ -34,8 +44,11 @@ func ParsePapAVPs(b []byte) (*PapCredential, error) {
 		code := binary.BigEndian.Uint32(b[pos : pos+4])
 		flags := b[pos+4]
 		length := int(b[pos+5])<<16 | int(b[pos+6])<<8 | int(b[pos+7])
-		if length < avpHeaderLen || pos+length > len(b) {
+		if length < avpHeaderLen {
 			return nil, errors.Errorf("ParsePapAVPs: bad AVP length %d at pos %d", length, pos)
+		}
+		if pos+length > len(b) {
+			return nil, errPapAVPsIncomplete
 		}
 		dataStart := pos + avpHeaderLen
 		if flags&avpFlagVendor != 0 {
@@ -65,7 +78,7 @@ func ParsePapAVPs(b []byte) (*PapCredential, error) {
 		}
 	}
 	if cred.UserName == nil || cred.UserPassword == nil {
-		return nil, errors.Errorf("ParsePapAVPs: missing User-Name or User-Password AVP")
+		return nil, errPapAVPsIncomplete
 	}
 	return cred, nil
 }

@@ -98,6 +98,11 @@ type Terminator struct {
 	// inner data, so the re-prompt in Process is bounded by maxInnerRounds.
 	innerRounds int
 
+	// innerBuf accumulates the decrypted tunneled bytes across rounds. The
+	// AVPs are a byte stream, so a peer may spread one AVP set over several
+	// records or several EAP packets.
+	innerBuf []byte
+
 	// closed guards Close so it is idempotent: bridge.close() itself is not
 	// documented as safe to call twice, and repeated calls happen naturally
 	// (e.g. a caller's own error-handling path calling Close after Process
@@ -238,11 +243,15 @@ func (t *Terminator) process(inTypeData []byte) (*TerminatorStep, error) {
 			if err != nil && err != io.EOF {
 				return nil, errors.Wrap(err, "Terminator: read inner")
 			}
-			if len(app) > 0 {
-				return t.finishInner(app)
+			if step, done, ferr := t.tryFinishInner(app); done {
+				return step, ferr
 			}
 			t.innerRounds++
 			if t.innerRounds > maxInnerRounds {
+				if len(t.innerBuf) > 0 {
+					return nil, errors.Errorf(
+						"Terminator: inner AVPs still incomplete after %d prompts", maxInnerRounds)
+				}
 				return nil, errors.Errorf("Terminator: no inner data after %d prompts", maxInnerRounds)
 			}
 			step, err := t.emitOutbound()
@@ -292,8 +301,8 @@ func (t *Terminator) process(inTypeData []byte) (*TerminatorStep, error) {
 			if err != nil && err != io.EOF {
 				return nil, errors.Wrap(err, "Terminator: probe inner")
 			}
-			if len(inner) > 0 {
-				return t.finishInner(inner)
+			if s, done, ferr := t.tryFinishInner(inner); done {
+				return s, ferr
 			}
 			step.AwaitingInner = true
 		}
@@ -302,6 +311,25 @@ func (t *Terminator) process(inTypeData []byte) (*TerminatorStep, error) {
 	default:
 		return nil, errors.Errorf("Terminator: Process called in terminal state")
 	}
+}
+
+// tryFinishInner adds this round's tunneled bytes to the inner stream and
+// completes the authentication once both PAP AVPs are present. done is false
+// while the stream is still short, which is the caller's cue to prompt the
+// peer again: RFC 5281 tunnels the AVPs as a byte stream, so they may arrive
+// over several records or several rounds.
+func (t *Terminator) tryFinishInner(app []byte) (step *TerminatorStep, done bool, err error) {
+	if len(app) > 0 {
+		t.innerBuf = append(t.innerBuf, app...)
+	}
+	if len(t.innerBuf) == 0 {
+		return nil, false, nil
+	}
+	step, err = t.finishInner(t.innerBuf)
+	if errors.Is(err, errPapAVPsIncomplete) {
+		return nil, false, nil
+	}
+	return step, true, err
 }
 
 // finishInner parses the peer's inner PAP AVPs, derives the keying material

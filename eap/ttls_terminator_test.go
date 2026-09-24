@@ -134,6 +134,24 @@ func runTtlsPeerObserved(
 	timeout time.Duration, observe func(*TerminatorStep),
 ) (*PapCredential, *TtlsKeys) {
 	t.Helper()
+	both := func(c *tls.Conn) error {
+		_, err := c.Write(append(
+			encodeAVP(avpCodeUserName, true, []byte(username)),
+			encodeAVP(avpCodeUserPassword, true, []byte(password))...))
+		return err
+	}
+	return runTtlsPeerWriters(t, term, start, []func(*tls.Conn) error{both}, timeout, observe)
+}
+
+// runTtlsPeerWriters is runTtlsPeerObserved with the inner writes spelled out
+// as a queue. Each writer runs when the handshake is done and the peer has no
+// bytes of its own left to send, so one writer sends its AVPs in a single
+// flight and several writers spread them over as many prompt/answer rounds.
+func runTtlsPeerWriters(
+	t *testing.T, term *Terminator, start *TerminatorStep, writers []func(*tls.Conn) error,
+	timeout time.Duration, observe func(*TerminatorStep),
+) (*PapCredential, *TtlsKeys) {
+	t.Helper()
 	if observe == nil {
 		observe = func(*TerminatorStep) {}
 	}
@@ -154,7 +172,7 @@ func runTtlsPeerObserved(
 
 	writeDone := make(chan error, 1)
 	handshakeChecked := false
-	writeStarted := false
+	pending := writers
 
 	deadline := time.Now().Add(timeout)
 
@@ -207,7 +225,7 @@ func runTtlsPeerObserved(
 
 		default:
 			raw := waitForClientBytes(
-				t, feed, hsDone, writeDone, &handshakeChecked, &writeStarted, client, username, password, deadline,
+				t, feed, hsDone, writeDone, &handshakeChecked, &pending, client, deadline,
 			)
 			pendingToServer = raw
 			inTypeData = nextClientFragment(t, &pendingToServer, peerMTU)
@@ -250,8 +268,8 @@ func nextClientFragment(t *testing.T, pending *[]byte, mtu int) []byte {
 // has been fully delivered is exactly the sequencing hazard Task 3 flagged
 // for the inner read (calling it before the record is delivered stalls).
 func waitForClientBytes(
-	t *testing.T, feed *feedConn, hsDone, writeDone chan error, handshakeChecked, writeStarted *bool,
-	client *tls.Conn, username, password string, deadline time.Time,
+	t *testing.T, feed *feedConn, hsDone, writeDone chan error, handshakeChecked *bool,
+	pending *[]func(*tls.Conn) error, client *tls.Conn, deadline time.Time,
 ) []byte {
 	t.Helper()
 	for {
@@ -268,15 +286,10 @@ func waitForClientBytes(
 			default:
 			}
 		}
-		if *handshakeChecked && !*writeStarted {
-			*writeStarted = true
-			payload := append(
-				encodeAVP(avpCodeUserName, true, []byte(username)),
-				encodeAVP(avpCodeUserPassword, true, []byte(password))...)
-			go func() {
-				_, err := client.Write(payload)
-				writeDone <- err
-			}()
+		if *handshakeChecked && len(*pending) > 0 {
+			write := (*pending)[0]
+			*pending = (*pending)[1:]
+			go func() { writeDone <- write(client) }()
 		}
 		select {
 		case err := <-writeDone:
@@ -417,5 +430,72 @@ func TestTerminatorRejectsOversizedInboundMessage(t *testing.T) {
 	}
 	if !term.closed {
 		t.Fatal("terminator not closed after oversize error")
+	}
+}
+
+// TestTerminatorAcceptsAVPsInSeparateRecords: RFC 5281 carries the tunneled
+// AVPs as a byte stream, so a peer may put User-Name and User-Password in
+// records of their own. Reading one record and parsing it alone rejected such
+// a peer with "missing User-Name or User-Password".
+func TestTerminatorAcceptsAVPsInSeparateRecords(t *testing.T) {
+	term := NewTerminator(testTLSServerConfig(t), 0)
+	defer func() {
+		if err := term.Close(); err != nil {
+			t.Logf("close: %v", err)
+		}
+	}()
+	start, err := term.Process(nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	twoRecords := func(c *tls.Conn) error {
+		if _, werr := c.Write(encodeAVP(avpCodeUserName, true, []byte(testUserName))); werr != nil {
+			return werr
+		}
+		_, werr := c.Write(encodeAVP(avpCodeUserPassword, true, []byte(testPassword)))
+		return werr
+	}
+
+	cred, keys := runTtlsPeerWriters(
+		t, term, start, []func(*tls.Conn) error{twoRecords}, 5*time.Second, nil)
+	if string(cred.UserName) != testUserName || string(cred.UserPassword) != testPassword {
+		t.Fatalf("cred = %q/%q, want %q/%q",
+			cred.UserName, cred.UserPassword, testUserName, testPassword)
+	}
+	if keys == nil {
+		t.Fatal("keys not derived")
+	}
+}
+
+// TestTerminatorAcceptsAVPsAcrossRounds: the same byte stream may also arrive
+// in separate EAP packets, one prompt apart. The terminator must accumulate
+// the inner bytes rather than parse each round in isolation.
+func TestTerminatorAcceptsAVPsAcrossRounds(t *testing.T) {
+	term := NewTerminator(testTLSServerConfig(t), 0)
+	defer func() {
+		if err := term.Close(); err != nil {
+			t.Logf("close: %v", err)
+		}
+	}()
+	start, err := term.Process(nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	writeName := func(c *tls.Conn) error {
+		_, werr := c.Write(encodeAVP(avpCodeUserName, true, []byte(testUserName)))
+		return werr
+	}
+	writePassword := func(c *tls.Conn) error {
+		_, werr := c.Write(encodeAVP(avpCodeUserPassword, true, []byte(testPassword)))
+		return werr
+	}
+
+	cred, _ := runTtlsPeerWriters(
+		t, term, start, []func(*tls.Conn) error{writeName, writePassword}, 5*time.Second, nil)
+	if string(cred.UserName) != testUserName || string(cred.UserPassword) != testPassword {
+		t.Fatalf("cred = %q/%q, want %q/%q",
+			cred.UserName, cred.UserPassword, testUserName, testPassword)
 	}
 }

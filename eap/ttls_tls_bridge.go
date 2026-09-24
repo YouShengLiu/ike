@@ -125,14 +125,39 @@ func (b *tlsBridge) connState() tls.ConnectionState {
 func (b *tlsBridge) takeAppData(d time.Duration) ([]byte, error) {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
+	ch := b.appDataPump()
+	var first appDataChunk
 	select {
-	case r, ok := <-b.appDataPump():
+	case r, ok := <-ch:
 		if !ok {
 			return nil, io.EOF
 		}
-		return r.data, r.err
+		first = r
 	case <-timer.C:
 		return nil, nil
+	}
+	if first.err != nil {
+		return first.data, first.err
+	}
+	// RFC 5281 carries the tunneled AVPs as a byte stream, and one chunk is
+	// one record: a peer may split a single AVP set across several. Take
+	// whatever else has already been decrypted so the caller parses the
+	// whole flight, never a fragment of it. This also keeps the pump from
+	// sitting on records nobody will ask for again.
+	data := first.data
+	for {
+		select {
+		case r, ok := <-ch:
+			if !ok {
+				return data, io.EOF
+			}
+			data = append(data, r.data...)
+			if r.err != nil {
+				return data, r.err
+			}
+		default:
+			return data, nil
+		}
 	}
 }
 
