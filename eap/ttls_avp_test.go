@@ -181,3 +181,46 @@ func encodeAVP(code uint32, mandatory bool, data []byte) []byte {
 	}
 	return out
 }
+
+// TestParsePapAVPsRejectsUnsupportedMandatoryAVP: RFC 5281 Section 10.1 says an
+// AVP whose M bit is set must be understood or the negotiation fails. Skipping
+// it silently means the peer believes a requirement was honoured when it was
+// not even read.
+func TestParsePapAVPsRejectsUnsupportedMandatoryAVP(t *testing.T) {
+	pap := append(encodeAVP(avpCodeUserName, true, []byte(testUserName)),
+		encodeAVP(avpCodeUserPassword, true, []byte(testPassword))...)
+
+	unknownMandatory := encodeAVP(402, true, []byte("chap-challenge"))
+	if _, err := ParsePapAVPs(append(unknownMandatory, pap...)); err == nil {
+		t.Fatal("unsupported AVP with the M bit set was accepted")
+	}
+
+	vendorMandatory := encodeVendorAVP(avpCodeUserName, 10415, []byte("trap"))
+	vendorMandatory[4] |= avpFlagMandatory
+	if _, err := ParsePapAVPs(append(vendorMandatory, pap...)); err == nil {
+		t.Fatal("mandatory vendor AVP was accepted")
+	}
+
+	unknownOptional := encodeAVP(402, false, []byte("chap-challenge"))
+	if _, err := ParsePapAVPs(append(unknownOptional, pap...)); err != nil {
+		t.Fatalf("optional unsupported AVP should be skipped, got %v", err)
+	}
+}
+
+// TestParsePapAVPsRejectsDuplicateAVP: a later AVP silently overwrote an
+// earlier one, so a peer could show one identity to anything that saw the
+// first AVP and authenticate as the one in the last.
+func TestParsePapAVPsRejectsDuplicateAVP(t *testing.T) {
+	name := encodeAVP(avpCodeUserName, true, []byte(testUserName))
+	pass := encodeAVP(avpCodeUserPassword, true, []byte(testPassword))
+
+	dupName := append(append(append([]byte(nil), name...), name...), pass...)
+	if _, err := ParsePapAVPs(dupName); err == nil {
+		t.Fatal("duplicate User-Name was accepted")
+	}
+
+	dupPass := append(append(append([]byte(nil), name...), pass...), pass...)
+	if _, err := ParsePapAVPs(dupPass); err == nil {
+		t.Fatal("duplicate User-Password was accepted")
+	}
+}

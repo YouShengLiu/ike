@@ -59,11 +59,28 @@ func ParsePapAVPs(b []byte) (*PapCredential, error) {
 			return nil, errors.Errorf("ParsePapAVPs: header overruns AVP length at pos %d", pos)
 		}
 		data := b[dataStart : pos+length]
-		if flags&avpFlagVendor == 0 {
+		known := flags&avpFlagVendor == 0 &&
+			(code == avpCodeUserName || code == avpCodeUserPassword)
+		if !known {
+			// RFC 5281 Section 10.1: an AVP the receiver does not understand
+			// must be rejected when its M bit is set, and may be ignored
+			// otherwise. A vendor AVP is never one of the two PAP AVPs, even
+			// when it reuses their code.
+			if flags&avpFlagMandatory != 0 {
+				return nil, errors.Errorf(
+					"ParsePapAVPs: unsupported mandatory AVP code %d at pos %d", code, pos)
+			}
+		} else {
 			switch code {
 			case avpCodeUserName:
+				if cred.UserName != nil {
+					return nil, errors.Errorf("ParsePapAVPs: duplicate User-Name AVP at pos %d", pos)
+				}
 				cred.UserName = append([]byte(nil), data...)
 			case avpCodeUserPassword:
+				if cred.UserPassword != nil {
+					return nil, errors.Errorf("ParsePapAVPs: duplicate User-Password AVP at pos %d", pos)
+				}
 				// RFC 5281 §11.2.2: the PAP password is zero-padded to a
 				// 16-octet boundary to obfuscate its length, and the AVP
 				// Length counts the padding. Strip trailing NULs to recover
