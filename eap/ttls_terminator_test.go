@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"strings"
 	"testing"
 	"time"
 )
@@ -497,5 +498,32 @@ func TestTerminatorAcceptsAVPsAcrossRounds(t *testing.T) {
 	if string(cred.UserName) != testUserName || string(cred.UserPassword) != testPassword {
 		t.Fatalf("cred = %q/%q, want %q/%q",
 			cred.UserName, cred.UserPassword, testUserName, testPassword)
+	}
+}
+
+// TestTerminatorReportsTunnelClosedByPeer: once the peer has torn the tunnel
+// down, every further read is EOF. Reading that as "no data this round" spent
+// the re-prompt budget and then blamed the peer for sending no inner data,
+// hiding what actually happened.
+func TestTerminatorReportsTunnelClosedByPeer(t *testing.T) {
+	term := driveToAwaitingInner(t)
+	t.Cleanup(func() {
+		// The bridge is closed below, so this second close is expected to
+		// report the already-closed engine; the test is about Process.
+		if err := term.Close(); err != nil {
+			t.Logf("Close: %v", err)
+		}
+	})
+
+	if err := term.bridge.close(); err != nil {
+		t.Logf("bridge close: %v", err)
+	}
+
+	_, err := processWithin(t, term, []byte{byte(EapTypeTtls), 0x00}, 2*time.Second)
+	if err == nil {
+		t.Fatal("Process succeeded after the tunnel closed, want an error")
+	}
+	if !strings.Contains(err.Error(), "tunnel closed") {
+		t.Fatalf("error = %v, want it to name the closed tunnel", err)
 	}
 }

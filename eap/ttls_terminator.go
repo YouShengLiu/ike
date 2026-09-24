@@ -240,11 +240,15 @@ func (t *Terminator) process(inTypeData []byte) (*TerminatorStep, error) {
 			// would park this goroutine forever in either case, so treat
 			// "no data" as "prompt again", up to maxInnerRounds.
 			app, err := t.bridge.takeAppData(innerProbeTimeout)
-			if err != nil && err != io.EOF {
+			if err != nil && !errors.Is(err, io.EOF) {
 				return nil, errors.Wrap(err, "Terminator: read inner")
 			}
 			if step, done, ferr := t.tryFinishInner(app); done {
 				return step, ferr
+			}
+			if errors.Is(err, io.EOF) {
+				return nil, errors.Errorf(
+					"Terminator: tunnel closed by peer before the inner AVPs were complete")
 			}
 			t.innerRounds++
 			if t.innerRounds > maxInnerRounds {
@@ -298,11 +302,14 @@ func (t *Terminator) process(inTypeData []byte) (*TerminatorStep, error) {
 			// authentication result leaves the peer waiting forever.
 			var inner []byte
 			inner, err = t.bridge.takeAppData(innerProbeTimeout)
-			if err != nil && err != io.EOF {
+			if err != nil && !errors.Is(err, io.EOF) {
 				return nil, errors.Wrap(err, "Terminator: probe inner")
 			}
 			if s, done, ferr := t.tryFinishInner(inner); done {
 				return s, ferr
+			}
+			if errors.Is(err, io.EOF) {
+				return nil, errors.Errorf("Terminator: tunnel closed by peer after the handshake")
 			}
 			step.AwaitingInner = true
 		}
