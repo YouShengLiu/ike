@@ -45,6 +45,13 @@ type tlsBridge struct {
 	// observable: nothing in the package waits on it, but a leak here is
 	// otherwise invisible until the process runs out of memory.
 	pumpDone chan struct{}
+
+	// parked counts readers waiting inside engineConn.Read for input. With an
+	// empty inbound buffer it is positive evidence that the engine has
+	// consumed everything the peer sent and will produce nothing further
+	// until more arrives. Without it a caller can only guess by waiting on a
+	// clock, which a peer can then make it do on demand.
+	parked int
 }
 
 // newTLSBridge starts a server-side TLS handshake in the background. The
@@ -95,6 +102,19 @@ func (b *tlsBridge) readOutbound() []byte {
 	return out
 }
 
+// engineWaiting reports whether the TLS engine has drained everything fed so
+// far and is parked waiting for more. Both conditions matter: bytes written
+// but not yet consumed mean the engine still has work to do, however many
+// readers are currently parked.
+func (b *tlsBridge) engineWaiting() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// A closed bridge is never merely waiting: its readers are on their way
+	// out and still counted as parked until each one re-acquires the lock,
+	// which would otherwise read as "the peer has said all it is going to".
+	return !b.closed && b.parked > 0 && b.inbound.Len() == 0
+}
+
 // handshakeDone reports whether the TLS handshake has finished (successfully
 // or not). Callers should check the error via a subsequent connState/read.
 func (b *tlsBridge) handshakeDone() bool {
@@ -126,25 +146,7 @@ func (b *tlsBridge) takeAppData(d time.Duration) ([]byte, error) {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	ch := b.appDataPump()
-	var first appDataChunk
-	select {
-	case r, ok := <-ch:
-		if !ok {
-			return nil, io.EOF
-		}
-		first = r
-	case <-timer.C:
-		return nil, nil
-	}
-	if first.err != nil {
-		return first.data, first.err
-	}
-	// RFC 5281 carries the tunneled AVPs as a byte stream, and one chunk is
-	// one record: a peer may split a single AVP set across several. Take
-	// whatever else has already been decrypted so the caller parses the
-	// whole flight, never a fragment of it. This also keeps the pump from
-	// sitting on records nobody will ask for again.
-	data := first.data
+	var data []byte
 	for {
 		select {
 		case r, ok := <-ch:
@@ -155,8 +157,37 @@ func (b *tlsBridge) takeAppData(d time.Duration) ([]byte, error) {
 			if r.err != nil {
 				return data, r.err
 			}
+			continue
 		default:
+		}
+		// Nothing queued this instant. A pump parked on an empty inbound
+		// buffer has decrypted everything the peer sent, so the flight is
+		// complete and waiting longer cannot add to it -- for a peer that
+		// sends its inner data in its own packet, which is every TLS 1.2
+		// peer, that wait was pure latency once per authentication. While
+		// the pump is still working, keep collecting: RFC 5281 tunnels the
+		// AVPs as a byte stream and one flight may decrypt to several
+		// chunks, so returning after the first would hand the caller a
+		// fragment and leave the rest with no packet left to prompt for.
+		if b.engineWaiting() {
+			select {
+			case r, ok := <-ch:
+				if !ok {
+					return data, io.EOF
+				}
+				data = append(data, r.data...)
+				if r.err != nil {
+					return data, r.err
+				}
+				continue
+			default:
+				return data, nil
+			}
+		}
+		select {
+		case <-timer.C:
 			return data, nil
+		case <-time.After(time.Millisecond):
 		}
 	}
 }
@@ -244,7 +275,10 @@ func (c engineConn) Read(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for b.inbound.Len() == 0 && !b.closed {
+		b.parked++
+		b.cond.Broadcast()
 		b.cond.Wait()
+		b.parked--
 	}
 	if b.inbound.Len() == 0 && b.closed {
 		return 0, io.EOF

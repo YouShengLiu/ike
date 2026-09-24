@@ -354,39 +354,45 @@ func TestTLSBridgeApplicationDataRoundTrip(t *testing.T) {
 	}
 }
 
-// TestTLSBridgeCloseUnblocksTakeAppData proves the specific concurrency
-// property this bridge exists to guarantee: a goroutine parked in
-// takeAppData() (waiting on the internal condition variable because no
-// inbound TLS bytes have been delivered yet) must be woken up by close(),
-// not left hanging forever. If engineConn.Close's cond.Broadcast were ever
-// dropped or misrouted, this test would hang until the -timeout kills the
-// whole test binary rather than failing cleanly -- so it uses its own
-// bounded select/timeout to fail promptly and informatively instead.
-func TestTLSBridgeCloseUnblocksTakeAppData(t *testing.T) {
+// TestTLSBridgeTakeAppDataNeverHangs covers the two ways takeAppData must
+// come back rather than park: while the engine is merely waiting for more
+// input from the peer it reports "no data" promptly, and once the bridge is
+// closed it reports EOF. Either way a caller's goroutine is never pinned by a
+// peer that simply stops talking. If the wake-ups behind this were ever
+// dropped the test would hang until -timeout killed the binary, so it bounds
+// itself and fails informatively instead.
+func TestTLSBridgeTakeAppDataNeverHangs(t *testing.T) {
 	serverCfg := testTLSServerConfig(t)
 	bridge := newTLSBridge(serverCfg)
 
-	// No writeInbound has happened yet, so this call blocks in engineConn.Read
-	// waiting on the condition variable.
-	readResult := make(chan error, 1)
+	// Nothing has been fed, so the engine is parked waiting for input.
+	waiting := make(chan error, 1)
 	go func() {
 		_, err := bridge.takeAppData(10 * time.Second)
-		readResult <- err
+		waiting <- err
 	}()
-
-	// Give the goroutine a moment to actually reach the blocking wait before
-	// closing, so this test exercises the "already blocked" case rather than
-	// racing close() ahead of the Read call.
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case err := <-waiting:
+		if err != nil {
+			t.Fatalf("takeAppData on an idle engine = %v, want no data and no error", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("takeAppData did not return while the engine was waiting for input")
+	}
 
 	if err := bridge.close(); err != nil {
 		t.Logf("bridge close: %v", err)
 	}
 
+	closed := make(chan error, 1)
+	go func() {
+		_, err := bridge.takeAppData(10 * time.Second)
+		closed <- err
+	}()
 	select {
-	case err := <-readResult:
+	case err := <-closed:
 		if err == nil {
-			t.Fatal("takeAppData returned nil error after close, want a non-nil error (e.g. io.EOF)")
+			t.Fatal("takeAppData returned nil error after close, want io.EOF")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("takeAppData did not unblock within 2s after close(); cond.Broadcast likely missing/misrouted")
@@ -443,7 +449,7 @@ func TestTLSBridgePumpExitsWhenNobodyDrains(t *testing.T) {
 		}
 	}
 
-	// The terminator's behaviour: take the first chunk, then stop reading.
+	// The terminator's behavior: take the first chunk, then stop reading.
 	if _, err := bridge.takeAppData(2 * time.Second); err != nil {
 		t.Fatalf("takeAppData: %v", err)
 	}

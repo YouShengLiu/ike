@@ -572,3 +572,36 @@ func TestTerminatorRejectsPeerDataDuringFragmentTrain(t *testing.T) {
 		t.Fatal("bare ack produced no next fragment")
 	}
 }
+
+// TestTerminatorDoesNotStallOnPartialRecord: a peer that sends the first few
+// bytes of a TLS record and stops leaves the engine waiting for the rest. That
+// is an ordinary "nothing to say yet", but it used to be indistinguishable
+// from a stuck engine, so Process sat on the caller's goroutine for the whole
+// bridgeOutputTimeout before giving up. The peer pays one small packet for it
+// and can repeat it at will.
+func TestTerminatorDoesNotStallOnPartialRecord(t *testing.T) {
+	term := NewTerminator(testTLSServerConfig(t), 0)
+	t.Cleanup(func() {
+		if err := term.Close(); err != nil {
+			t.Logf("Close: %v", err)
+		}
+	})
+	if _, err := term.Process(nil); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	partial := &EapTtls{TLSData: []byte{0x16, 0x03, 0x01}} // a record header, cut short
+	in, err := partial.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	started := time.Now()
+	if _, err = processWithin(t, term, in, 2*time.Second); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Process took %v on a partial record; it waited out a timeout instead of"+
+			" noticing the engine was waiting for input", elapsed)
+	}
+}

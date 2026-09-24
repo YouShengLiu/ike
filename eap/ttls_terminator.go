@@ -434,7 +434,8 @@ func (t *Terminator) emitOutbound() (*TerminatorStep, error) {
 // rather than silently returning an empty packet (which would otherwise
 // look identical to the legitimate case and desync the peer).
 func (t *Terminator) waitForBridgeOutput() ([]byte, error) {
-	deadline := time.Now().Add(bridgeOutputTimeout)
+	timer := time.NewTimer(bridgeOutputTimeout)
+	defer timer.Stop()
 	for {
 		if out := t.bridge.readOutbound(); len(out) > 0 {
 			return out, nil
@@ -442,9 +443,23 @@ func (t *Terminator) waitForBridgeOutput() ([]byte, error) {
 		if t.bridge.handshakeDone() {
 			return nil, nil
 		}
-		if time.Now().After(deadline) {
-			return nil, errors.Errorf("Terminator: timed out waiting for TLS engine output")
+		if t.bridge.engineWaiting() {
+			// The engine consumed everything the peer sent and is waiting
+			// for more, so this round produces nothing further. Check the
+			// buffer once more before saying so: the engine writes its
+			// flight and only then goes back to read, so output produced
+			// since the check at the top of the loop is already there.
+			if out := t.bridge.readOutbound(); len(out) > 0 {
+				return out, nil
+			}
+			return nil, nil
 		}
-		time.Sleep(time.Millisecond)
+		select {
+		case <-t.bridge.done:
+			return nil, nil
+		case <-timer.C:
+			return nil, errors.Errorf("Terminator: timed out waiting for TLS engine output")
+		case <-time.After(time.Millisecond):
+		}
 	}
 }

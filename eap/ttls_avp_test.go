@@ -184,7 +184,7 @@ func encodeAVP(code uint32, mandatory bool, data []byte) []byte {
 
 // TestParsePapAVPsRejectsUnsupportedMandatoryAVP: RFC 5281 Section 10.1 says an
 // AVP whose M bit is set must be understood or the negotiation fails. Skipping
-// it silently means the peer believes a requirement was honoured when it was
+// it silently means the peer believes a requirement was honored when it was
 // not even read.
 func TestParsePapAVPsRejectsUnsupportedMandatoryAVP(t *testing.T) {
 	pap := append(encodeAVP(avpCodeUserName, true, []byte(testUserName)),
